@@ -86,7 +86,13 @@ async function main() {
   await C.g.sync(true);
   check(C.errors.length === 0, "sauvegarde locale toujours sans erreur " + C.errors.join(" | "));
 
-  // 5. adresse invalide
+  // 5. détection du dépôt : racine oui, sous-dossier ou dossier sans git non
+  fs.mkdirSync(a + "/sous-dossier");
+  check(await backup(a).g.isRepo(), "racine du dépôt reconnue");
+  check(!(await backup(a + "/sous-dossier").g.isRepo()), "sous-dossier d'un dépôt pas pris pour un dépôt");
+  check(!(await backup(vault("sans-git", {})).g.isRepo()), "dossier sans git pas pris pour un dépôt");
+
+  // 6. adresse invalide
   check(!(await C.setup.connectRemote("pas une adresse")).ok, "adresse invalide refusée");
 
   fs.rmSync(root, { recursive: true, force: true });

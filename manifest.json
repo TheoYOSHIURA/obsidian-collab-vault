@@ -1,7 +1,7 @@
 {
   "id": "collab-vault",
   "name": "Collab Vault",
-  "version": "0.4.3",
+  "version": "0.4.4",
   "minAppVersion": "1.6.0",
   "description": "Édition à plusieurs en temps réel (curseurs partagés), sans serveur, avec sauvegarde git automatique.",
   "author": "theoyoshi",

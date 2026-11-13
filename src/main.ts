@@ -386,6 +386,24 @@ export default class CollabVault extends Plugin {
     await this.app.vault.adapter.write(ROOM_FILE, JSON.stringify(r, null, 2) + "\n");
   }
 
+  private lastNetworkNotice = 0;
+  /**
+   * Un membre est trouvé (via les relais) mais la connexion directe échoue : souvent un réseau
+   * trop fermé (école, entreprise). On le dit, sinon on croit être dans la session alors qu'on est seul.
+   */
+  private networkError(e: unknown) {
+    console.warn("[collab-vault] réseau", e);
+    if ((e as any)?.code !== "peer-connect-failed") return;
+    if (Date.now() - this.lastNetworkNotice < 10 * 60 * 1000) return;
+    this.lastNetworkNotice = Date.now();
+    new Notice(
+      "Collab Vault : impossible de se connecter directement à un autre membre. Le réseau de cet ordinateur " +
+        "bloque sans doute les connexions directes (réseau d'école ou d'entreprise). Tes modifs passent quand même " +
+        "par GitHub, avec quelques minutes de délai.",
+      15000,
+    );
+  }
+
   /** Identifiant de la session en cours (pour voir si room.json a changé). */
   private currentRoom: string | null = null;
   /** Dernier échec de connexion : on ne réessaie pas en boucle. */
@@ -440,7 +458,7 @@ export default class CollabVault extends Plugin {
       );
       transport.onFile((op, data, from) => void this.onRemoteFile(op, data, from));
       transport.onRekey((cfg, from) => void this.onRemoteRekey(cfg, from));
-      transport.onError(e => console.warn("[collab-vault] réseau", e));
+      transport.onError(e => this.networkError(e));
       this.transport = transport;
       this.session = session;
       session.start();

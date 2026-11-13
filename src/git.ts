@@ -200,7 +200,10 @@ export class Git extends GitBase {
   /** Le coffre est-il la racine d'un dépôt ? (pas juste un sous-dossier d'un autre dépôt) */
   async isRepo() {
     try {
-      return samePath(await this.run(["rev-parse", "--show-toplevel"]), this.cwd);
+      // --show-cdup est vide à la racine du dépôt. On évite de comparer des chemins : un git
+      // MSYS2/Cygwin répond /c/Users/… au lieu de C:\Users\…, et le coffre passait pour « sans git ».
+      const inside = await this.run(["rev-parse", "--is-inside-work-tree"]);
+      return inside === "true" && (await this.run(["rev-parse", "--show-cdup"])) === "";
     } catch {
       return false;
     }
