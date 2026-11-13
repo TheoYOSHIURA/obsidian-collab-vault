@@ -26,7 +26,7 @@ Plugin Obsidian pour écrire à plusieurs dans un même coffre, en temps réel (
 
 ### Android / iPhone
 1. Dans Obsidian mobile, crée un coffre vide.
-2. Installe le plugin **BRAT** depuis les plugins communautaires, puis ajoute le plugin beta `TheoYOSHIURA/obsidian-collab-vault`. Si le dépôt est privé, il faut aussi un jeton GitHub dans les réglages de BRAT.
+2. Installe le plugin **BRAT** depuis les plugins communautaires, puis ajoute le plugin beta `TheoYOSHIURA/obsidian-collab-vault`.
 3. Ouvre le lien d'invitation (`obsidian://collab-vault?...`) : les notes arrivent depuis la session. Il faut qu'un membre soit connecté.
 4. **Optionnel, sauvegarde git sur le téléphone :** réglages du plugin → « Ouvrir l'assistant ». Indique l'adresse du dépôt (déjà remplie si elle figure dans l'invitation), un **jeton GitHub**, ton nom et ton e-mail.
    - Le jeton : github.com → Settings → Developer settings → Personal access tokens → **Fine-grained tokens** → Generate new token. Dans « Repository access », choisis *Only select repositories* → le dépôt du coffre. Dans « Permissions », mets **Contents : Read and write**.
