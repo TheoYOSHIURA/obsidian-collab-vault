@@ -40,7 +40,7 @@ function run(bin: string, args: string[], opts: { cwd?: string; input?: string; 
 }
 
 /** Emplacements habituels de git sous Windows (le PATH d'Obsidian n'est pas à jour juste après l'installation). */
-function windowsCandidates() {
+export function windowsCandidates() {
   const env = process.env;
   return [
     env.ProgramFiles && `${env.ProgramFiles}\\Git\\cmd\\git.exe`,
@@ -110,6 +110,50 @@ export class GitSetup {
     return (await run(this.bin, ["remote", "get-url", "origin"], { cwd: this.cwd, quiet: true })).out.trim();
   }
 
+  /** Dossier des commandes internes de git (montre quelle installation est utilisée). */
+  async execPath(): Promise<string> {
+    return (await run(this.bin, ["--exec-path"], { quiet: true, timeoutMs: 10000 })).out.trim();
+  }
+
+  /**
+   * Git Credential Manager (la fenêtre de connexion GitHub) installé sur l'ordinateur ?
+   * Il est inclus dans Git for Windows, mais pas dans d'autres git (GitHub Desktop, MSYS2…).
+   */
+  async findCredentialManager(): Promise<string | null> {
+    if (process.platform !== "win32") return null;
+    const path = node<typeof import("path")>("path");
+    const env = process.env;
+    const exec = await this.execPath();
+    const dirs = [
+      exec,
+      exec && path.join(exec, "..", "..", "bin"),
+      env.ProgramFiles && `${env.ProgramFiles}\\Git\\mingw64\\bin`,
+      env["ProgramFiles(x86)"] && `${env["ProgramFiles(x86)"]}\\Git\\mingw64\\bin`,
+      env.LOCALAPPDATA && `${env.LOCALAPPDATA}\\Programs\\Git\\mingw64\\bin`,
+      env.ProgramFiles && `${env.ProgramFiles}\\Git Credential Manager`,
+      env["ProgramFiles(x86)"] && `${env["ProgramFiles(x86)"]}\\Git Credential Manager`,
+      env.LOCALAPPDATA && `${env.LOCALAPPDATA}\\Programs\\Git Credential Manager`,
+    ].filter(Boolean) as string[];
+    for (const d of dirs) {
+      for (const n of ["git-credential-manager.exe", "git-credential-manager-core.exe"]) {
+        const p = path.join(d, n);
+        if (fs().existsSync(p)) return p;
+      }
+    }
+    return null;
+  }
+
+  /** Pas de gestionnaire d'identifiants réglé : on branche Git Credential Manager s'il est installé. */
+  async ensureCredentialHelper(): Promise<boolean> {
+    if (await this.helper()) return true;
+    const gcm = await this.findCredentialManager();
+    if (!gcm) return false;
+    // Chemin absolu : git le lance via le shell, donc / et espaces échappés (C:/Program\ Files/…).
+    const value = gcm.replace(/\\/g, "/").replace(/ /g, "\\ ");
+    await run(this.bin, ["config", "--global", "credential.helper", value], { quiet: true });
+    return !!(await this.helper());
+  }
+
   /** Gestionnaire d'identifiants actif (le dernier non vide : une valeur vide annule les précédentes). */
   async helper(): Promise<string> {
     const all = (await run(this.bin, ["config", "--get-all", "credential.helper"], { cwd: this.cwd, quiet: true })).out;
@@ -120,17 +164,18 @@ export class GitSetup {
    * Connexion visuelle : on demande un identifiant à git ; avec Git for Windows,
    * Git Credential Manager ouvre la fenêtre / la page de connexion GitHub.
    */
-  async login(): Promise<{ ok: boolean; message: string }> {
+  async login(): Promise<{ ok: boolean; message: string; noHelper?: boolean }> {
     const remote = await this.remoteHost();
     if (!remote) {
       return { ok: false, message: "Le dépôt n'utilise pas une adresse https (ex. SSH) : la connexion se règle hors d'Obsidian." };
     }
-    if (!(await this.helper())) {
+    if (!(await this.ensureCredentialHelper())) {
       return {
         ok: false,
+        noHelper: true,
         message:
           process.platform === "win32"
-            ? "Aucun gestionnaire de connexion : réinstalle Git for Windows (il inclut Git Credential Manager)."
+            ? "Ce git n'a pas la fenêtre de connexion GitHub (Git Credential Manager). Installe Git for Windows, ou choisis un autre git ci-dessus."
             : "Aucun gestionnaire de connexion configuré. Dans un terminal : gh auth login puis gh auth setup-git.",
       };
     }
@@ -246,6 +291,8 @@ export class GitSetupModal extends Modal {
   private autoLoginTried = false;
   /** Raison du dernier échec de connexion, affichée sous l'étape. */
   private loginResult = "";
+  /** Le git utilisé n'a pas de Git Credential Manager : on propose d'installer Git for Windows. */
+  private noHelper = false;
 
   constructor(
     app: App,
@@ -255,6 +302,8 @@ export class GitSetupModal extends Modal {
       gitBin: () => string | null;
       /** Relance la détection de git après une installation ; renvoie le chemin trouvé. */
       redetect: () => Promise<string | null>;
+      /** Utilise ce git (chemin de git.exe) s'il fonctionne ; renvoie le chemin retenu ou null. */
+      setGitPath: (path: string) => Promise<string | null>;
       /** Appelé quand tout est prêt (pour relancer la sauvegarde / la session). `force` : sauvegarde tout de suite. */
       onReady: (force?: boolean) => void;
     },
@@ -313,9 +362,24 @@ export class GitSetupModal extends Modal {
       );
       return;
     }
-    step(true, "Git est installé", bin);
-
     const setup = new GitSetup(bin, this.ctx.cwd);
+
+    // Quel git est utilisé (utile quand il y en a plusieurs : Git for Windows, GitHub Desktop…) ; on peut en choisir un autre.
+    const gitStep = step(true, "Git est installé", `${bin} — ${(await setup.execPath()) || "?"}`);
+    let customPath = "";
+    gitStep.addText(t =>
+      t.setPlaceholder("C:\\Program Files\\Git\\cmd\\git.exe").onChange(v => (customPath = v.trim().replace(/^"|"$/g, ""))),
+    );
+    gitStep.addButton(b =>
+      b.setButtonText("Utiliser ce git").onClick(async () => {
+        if (!customPath) return new Notice("Colle le chemin de git.exe.");
+        const found = await this.ctx.setGitPath(customPath);
+        new Notice(found ? `Git utilisé : ${found}` : "Ce chemin ne mène pas à un git qui fonctionne.", 8000);
+        this.loginResult = "";
+        this.noHelper = false;
+        void this.render();
+      }),
+    );
 
     // 2. identité des commits
     const id = await setup.identity();
@@ -414,12 +478,43 @@ export class GitSetupModal extends Modal {
         const r = await setup.login();
         this.busy = false;
         this.loginResult = r.ok ? "" : r.message;
+        this.noHelper = !!r.noHelper;
         new Notice(r.message, 8000);
         void this.render();
       };
+      if (this.noHelper && process.platform === "win32") {
+        // Git for Windows inclut Git Credential Manager : une fois installé, on l'utilise à la place de ce git.
+        accessStep.addButton(b =>
+          b
+            .setButtonText("Installer Git for Windows")
+            .setCta()
+            .onClick(async () => {
+              if (this.busy) return;
+              this.busy = true;
+              b.setDisabled(true);
+              const ok = await installGitWindows(m => accessStep.setDesc(m));
+              let found: string | null = null;
+              for (const c of windowsCandidates()) {
+                if (ok && fs().existsSync(c)) found = await this.ctx.setGitPath(c);
+                if (found) break;
+              }
+              this.busy = false;
+              if (!found) {
+                new Notice("Installation automatique impossible : la page de téléchargement va s'ouvrir.", 8000);
+                window.open("https://git-scm.com/download/win");
+              } else {
+                this.noHelper = false;
+                this.loginResult = "";
+                this.autoLoginTried = false; // relance la connexion avec le nouveau git
+              }
+              void this.render();
+            }),
+        );
+      }
       accessStep.addButton(b => {
         button = b;
-        b.setButtonText("Se connecter à GitHub").setCta().onClick(() => void login());
+        b.setButtonText("Se connecter à GitHub").onClick(() => void login());
+        if (!this.noHelper) b.setCta();
       });
       // Pas d'identifiant sur cet ordinateur : on ouvre la connexion tout de suite (une fois par ouverture).
       if (access.needsLogin && !this.autoLoginTried) {

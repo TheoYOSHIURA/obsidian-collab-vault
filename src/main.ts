@@ -252,6 +252,14 @@ export default class CollabVault extends Plugin {
         await this.saveData(this.settings);
         return bin;
       },
+      setGitPath: async path => {
+        // findGit renvoie un autre git si celui-ci ne marche pas : on ne garde que le chemin demandé.
+        if ((await findGit(path)) !== path) return null;
+        this.settings.gitPath = path;
+        await this.saveData(this.settings);
+        await this.reloadGit(true);
+        return path;
+      },
       onReady: force => void this.reloadGit(force),
     }).open();
   }
