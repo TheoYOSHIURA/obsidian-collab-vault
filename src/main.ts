@@ -158,6 +158,8 @@ export default class CollabVault extends Plugin {
     return [
       ".obsidian/workspace.json",
       ".obsidian/workspace-mobile.json",
+      // Créé quand on ouvre par erreur le dossier .obsidian comme un coffre.
+      ".obsidian/.obsidian/",
       `${this.manifest.dir}/data.json`,
       `${this.manifest.dir}/base-*.json`,
     ];
@@ -346,6 +348,9 @@ export default class CollabVault extends Plugin {
       }, Math.max(1, this.settings.pullIntervalMin) * 60 * 1000),
     );
 
+    // Invitation reçue par git pendant qu'Obsidian est ouvert : on la remarque en quelques secondes.
+    this.registerInterval(window.setInterval(() => void this.checkRoom(), 10 * 1000));
+
     // Avant de rejoindre : on envoie ses modifs locales et on récupère celles des autres.
     if (this.git && this.settings.pullOnStartup) await this.git.sync(true);
     await this.startSession();
@@ -373,6 +378,30 @@ export default class CollabVault extends Plugin {
     await this.app.vault.adapter.write(ROOM_FILE, JSON.stringify(r, null, 2) + "\n");
   }
 
+  /** Identifiant de la session en cours (pour voir si room.json a changé). */
+  private currentRoom: string | null = null;
+  /** Dernier échec de connexion : on ne réessaie pas en boucle. */
+  private startFailedAt = 0;
+
+  /**
+   * room.json peut arriver ou changer par git (activation ou nouvelle clé faite par un autre
+   * membre) : on rejoint alors la session sans attendre un redémarrage d'Obsidian.
+   */
+  async checkRoom() {
+    if (this.starting || Date.now() - this.startFailedAt < 5 * 60 * 1000) return;
+    const room = await this.readRoom();
+    if (!room) return;
+    if (!this.session) {
+      console.log("[collab-vault] invitation trouvée dans le coffre : on rejoint la session");
+      return this.startSession();
+    }
+    if (this.currentRoom && room.room !== this.currentRoom) {
+      console.log("[collab-vault] la clé du coffre a changé : on rejoint la nouvelle session");
+      await this.stopSession();
+      await this.startSession();
+    }
+  }
+
   async startSession() {
     if (this.session || this.starting) return;
     const room = await this.readRoom();
@@ -381,6 +410,8 @@ export default class CollabVault extends Plugin {
     this.updateStatus();
     try {
       const transport = await TrysteroTransport.connect(room.room, room.secret);
+      this.currentRoom = room.room;
+      this.startFailedAt = 0;
       const session = new Session(
         transport,
         this.disk(),
@@ -407,6 +438,7 @@ export default class CollabVault extends Plugin {
       session.start();
       session.setActiveFile(this.app.workspace.getActiveFile()?.path ?? null);
     } catch (e: any) {
+      this.startFailedAt = Date.now();
       new Notice("Collab Vault : connexion impossible\n" + e.message, 10000);
       console.error(e);
     } finally {
