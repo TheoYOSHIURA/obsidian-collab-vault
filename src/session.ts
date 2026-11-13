@@ -2,6 +2,7 @@
 // Indépendant d'Obsidian (disque et réseau sont injectés) pour pouvoir être testé seul.
 import * as Y from "yjs";
 import * as aw from "y-protocols/awareness";
+import { diff3Merge } from "node-diff3";
 
 /** Origine des transactions venant d'un autre pair. */
 export const REMOTE = "remote";
@@ -17,6 +18,15 @@ export interface Disk {
   write(path: string, content: string): Promise<void>;
   remove(path: string): Promise<void>;
   rename(from: string, to: string): Promise<void>;
+}
+
+/**
+ * Dernière version PARTAGÉE de chaque note (enregistrée sur l'appareil). Sert de base
+ * à la fusion à trois quand on rejoint une session après avoir modifié hors ligne.
+ */
+export interface BaseStore {
+  load(): Promise<Record<string, string> | null>;
+  save(texts: Record<string, string>): Promise<void>;
 }
 
 export interface Hello {
@@ -63,6 +73,8 @@ export interface SessionOptions {
   /** Temps d'attente d'un hôte avant de devenir soi-même l'hôte. */
   joinTimeoutMs: number;
   writeDelayMs?: number;
+  base?: BaseStore;
+  baseSaveDelayMs?: number;
 }
 
 export interface Member {
@@ -91,6 +103,7 @@ export class Session {
   private dirtyDuringConnect = new Set<string>();
   private queue: Promise<unknown> = Promise.resolve();
   private stopped = false;
+  private baseTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(
     readonly transport: Transport,
@@ -124,6 +137,10 @@ export class Session {
   }
 
   async stop() {
+    if (this.baseTimer) {
+      clearTimeout(this.baseTimer);
+      await this.saveBase();
+    }
     this.stopped = true;
     if (this.joinTimer) clearTimeout(this.joinTimer);
     for (const t of this.writeTimers.values()) clearTimeout(t);
@@ -171,6 +188,7 @@ export class Session {
     });
     this.doc.on("update", (update: Uint8Array, origin: unknown) => {
       if (origin !== REMOTE && origin !== "sync" && this.origin) this.transport.sendY("u", update);
+      this.scheduleBaseSave();
     });
     this.awareness.on("update", ({ added, updated, removed }: AwChange, origin: unknown) => {
       if (origin === REMOTE || !this.seeded) return;
@@ -227,6 +245,31 @@ export class Session {
     return !!h && !!this.origin && h.origin === this.origin;
   }
 
+  // ---------------------------------------------------------------- base partagée
+
+  /** La version actuelle est « partagée » dès qu'un autre membre est là. */
+  private scheduleBaseSave() {
+    if (!this.opts.base || !this.seeded || this.stopped || this.members().length < 2) return;
+    if (this.baseTimer) return;
+    this.baseTimer = setTimeout(() => {
+      this.baseTimer = null;
+      void this.saveBase();
+    }, this.opts.baseSaveDelayMs ?? 5000);
+  }
+
+  private async saveBase() {
+    if (!this.opts.base || !this.seeded) return;
+    const texts: Record<string, string> = {};
+    for (const [p, t] of this.files.entries()) texts[p] = t.toString();
+    await this.opts.base.save(texts).catch(e => this.hooks.log("sauvegarde de la base impossible", e));
+  }
+
+  /** Lecture disque normalisée (Windows : CRLF → LF, sinon les positions de l'éditeur divergent). */
+  private async readDisk(path: string) {
+    const c = await this.disk.read(path);
+    return c == null ? null : c.replace(/\r\n?/g, "\n");
+  }
+
   private onHello(h: Hello, from: string) {
     if (h?.v !== 1) return;
     const prev = this.peers.get(from);
@@ -245,6 +288,7 @@ export class Session {
         this.requestSync(from, h);
       }
     }
+    this.scheduleBaseSave();
     this.hooks.onPeers();
   }
 
@@ -257,6 +301,9 @@ export class Session {
     this.syncingFrom = from;
     this.origin = h.origin;
     this.originAt = h.originAt;
+    // On annonce tout de suite notre session : les modifs qu'on enverra pendant la fusion
+    // d'arrivée seraient sinon rejetées (et bloqueraient toutes les suivantes côté Yjs).
+    this.broadcastHello();
     this.transport.sendY("s1", Y.encodeStateVector(this.doc), from);
     // Si l'hôte ne répond pas, on réessaie avec quelqu'un d'autre (ou on devient hôte).
     setTimeout(() => {
@@ -309,7 +356,7 @@ export class Session {
     this.seeding = true;
     try {
       const paths = await this.disk.listText();
-      const contents = await Promise.all(paths.map(p => this.disk.read(p)));
+      const contents = await Promise.all(paths.map(p => this.readDisk(p)));
       if (this.seeded || this.stopped) return;
       this.doc.transact(() => {
         paths.forEach((p, i) => {
@@ -328,25 +375,87 @@ export class Session {
     for (const [id, h] of this.peers) this.onHello(h, id);
   }
 
-  /** Après la synchro initiale : le doc de la session fait foi, on met le disque à jour. */
+  /**
+   * Après la synchro initiale : on réconcilie le disque avec la session.
+   * Pour chaque note, on compare 3 versions : D (session), L (disque local) et B (dernière
+   * version partagée connue de cet appareil). Ce qui a changé localement depuis B
+   * (édition hors ligne, git pull…) est fusionné ; sinon la session fait foi.
+   */
   private async materializeAll() {
-    let written = 0;
-    for (const [path, ytext] of Array.from(this.files.entries())) {
-      const content = ytext.toString();
-      const onDisk = await this.disk.read(path);
-      if (onDisk === content) continue;
-      if (onDisk != null && this.dirtyDuringConnect.has(path)) {
-        // Modifié localement pendant la connexion : on garde la modif et on la partage.
-        this.doc.transact(() => applyDiff(ytext, onDisk), DISK);
+    const base = (await this.opts.base?.load().catch(() => null)) ?? null;
+    const stats = { written: 0, merged: 0, conflicts: 0, added: 0, removed: 0 };
+    const paths = new Set([...this.files.keys(), ...(await this.disk.listText())]);
+    for (const path of paths) {
+      const ytext = this.files.get(path);
+      const D = ytext?.toString();
+      const L = await this.readDisk(path);
+      const B = base?.[path];
+      if (L === D || (L == null && D === undefined)) continue;
+
+      if (D === undefined) {
+        // Seulement sur ce disque.
+        if (B !== undefined && L === B) {
+          await this.disk.remove(path); // supprimée dans la session pendant notre absence
+          stats.removed++;
+        } else {
+          this.doc.transact(() => this.files.set(path, new Y.Text(L!)), DISK); // créée hors ligne
+          stats.added++;
+        }
         continue;
       }
-      this.lastWritten.set(path, content);
-      await this.disk.write(path, content);
-      written++;
+      if (L == null) {
+        if (B !== undefined && D === B) {
+          this.doc.transact(() => this.files.delete(path), DISK); // supprimée hors ligne
+          stats.removed++;
+        } else {
+          await this.writeDisk(path, D);
+          stats.written++;
+        }
+        continue;
+      }
+      if (B === undefined) {
+        // Pas d'historique pour cette note : la session fait foi, sauf modif pendant la connexion.
+        if (this.dirtyDuringConnect.has(path)) this.doc.transact(() => applyDiff(ytext!, L), DISK);
+        else await this.writeDisk(path, D);
+        stats.written++;
+        continue;
+      }
+      if (L === B) {
+        await this.writeDisk(path, D); // notre copie était juste en retard
+        stats.written++;
+      } else if (D === B) {
+        this.doc.transact(() => applyDiff(ytext!, L), DISK); // seul ce disque a changé
+        stats.merged++;
+      } else {
+        const m = merge3(L, B, D);
+        if (m.clean) {
+          this.doc.transact(() => applyDiff(ytext!, m.text), DISK);
+          await this.writeDisk(path, m.text);
+          stats.merged++;
+        } else {
+          // Mêmes lignes modifiées des deux côtés : la session garde sa version,
+          // la nôtre est conservée dans une copie.
+          const copy = conflictPath(path, this.opts.name);
+          this.doc.transact(() => this.files.set(copy, new Y.Text(L)), DISK);
+          await this.writeDisk(copy, L);
+          await this.writeDisk(path, D);
+          stats.conflicts++;
+        }
+      }
     }
     this.dirtyDuringConnect.clear();
     this.markSeeded();
-    this.hooks.log(`session rejointe, ${written} fichier(s) mis à jour`);
+    this.lastJoin = stats;
+    this.hooks.log("session rejointe", stats);
+    void this.saveBase();
+  }
+
+  /** Bilan de la dernière arrivée dans une session (pour l'afficher). */
+  lastJoin: { written: number; merged: number; conflicts: number; added: number; removed: number } | null = null;
+
+  private async writeDisk(path: string, content: string) {
+    this.lastWritten.set(path, content);
+    await this.disk.write(path, content);
   }
 
   private markSeeded() {
@@ -398,7 +507,7 @@ export class Session {
       // Une suppression + un ajout au même contenu = un renommage.
       let renamedFrom: string | undefined;
       for (const d of left) {
-        if ((await this.disk.read(d)) === content) {
+        if ((await this.readDisk(d)) === content) {
           renamedFrom = d;
           break;
         }
@@ -445,7 +554,7 @@ export class Session {
       return;
     }
     if (this.hooks.isBound(path)) return;
-    const content = await this.disk.read(path);
+    const content = await this.readDisk(path);
     if (content == null || !this.seeded) return;
     const ytext = this.files.get(path);
     if (ytext && ytext.toString() === content) return;
@@ -490,6 +599,22 @@ export class Session {
 }
 
 type AwChange = { added: number[]; updated: number[]; removed: number[] };
+
+/** Fusion à trois par lignes. Les modifications identiques des deux côtés ne sont pas des conflits. */
+export function merge3(local: string, base: string, remote: string): { clean: boolean; text: string } {
+  const regions = diff3Merge(local, base, remote, { excludeFalseConflicts: true, stringSeparator: /\n/ });
+  if (regions.some(r => r.conflict)) return { clean: false, text: remote };
+  return { clean: true, text: regions.flatMap(r => r.ok ?? []).join("\n") };
+}
+
+function conflictPath(path: string, who: string) {
+  const dot = path.lastIndexOf(".");
+  const d = new Date();
+  const pad = (n: number) => String(n).padStart(2, "0");
+  const stamp = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}h${pad(d.getMinutes())}`;
+  const safe = who.replace(/[\\/:*?"<>|#^[\]]/g, "");
+  return `${path.slice(0, dot)} (conflit ${safe} ${stamp})${path.slice(dot)}`;
+}
 
 /** Remplace le contenu d'un Y.Text par `next` en ne touchant que la partie modifiée. */
 export function applyDiff(ytext: Y.Text, next: string) {

@@ -105,4 +105,25 @@ check "les modifs de v3 n'arrivent plus" "$(grep -c 'v3 après son retrait' $E/v
 check "v1 et v2 collaborent toujours" "$(grep -c 'v2 après le retrait' $E/v1/Accueil.md)" "1"
 sleep 30
 check "la nouvelle clé est sauvegardée dans git" "$(git -C $E/remote.git show HEAD:.collab/room.json | md5sum)" "$(cat $E/v1/.collab/room.json | md5sum)"
+
+# assistant git
+SETUP='app.commands.executeCommandById("collab-vault:git-setup"); await new Promise(r=>setTimeout(r,4000)); const c=[...document.querySelectorAll(".modal-container")].at(-1); const t=c.innerText; c.querySelector(".modal-close-button")?.click(); return t'
+OUT=$(c v1 "$SETUP")
+check "assistant : git installé + accès OK + identité" "$(has "$OUT" "Git est installé")$(has "$OUT" "Accès au dépôt OK")$(has "$OUT" "v1 <v1@t>")" "ouiouioui"
+OUT=$(c v1 'const p=app.plugins.plugins["collab-vault"]; const keep=p.settings.gitPath; p.settings.gitPath=""; app.commands.executeCommandById("collab-vault:git-setup"); await new Promise(r=>setTimeout(r,1500)); const c=[...document.querySelectorAll(".modal-container")].at(-1); const t=c.innerText; c.querySelector(".modal-close-button")?.click(); p.settings.gitPath=keep; return t')
+check "assistant : propose d'installer git s'il manque" "$(has "$OUT" "Git n'est pas installé")$(has "$OUT" "Page de téléchargement")" "ouioui"
+
+# v3 en « mode téléphone » : pas de git, pas d'accès au dossier, rejoint par lien puis modifie hors ligne
+c v3 'app.plugins.plugins["collab-vault"].constructor.platform.isDesktopApp=false; await app.plugins.disablePlugin("collab-vault"); await app.plugins.enablePlugin("collab-vault"); return 1' >/dev/null
+ROOM=$(cat $E/v1/.collab/room.json)
+c v3 'const r='"$ROOM"'; app.plugins.plugins["collab-vault"].handleInviteLink({room:r.room, secret:r.secret, name:"Test"}); await new Promise(r=>setTimeout(r,500)); [...[...document.querySelectorAll(".modal-container")].at(-1).querySelectorAll("button")].find(b=>b.textContent==="Rejoindre").click(); return 1' >/dev/null
+for i in $(seq 1 40); do s=$(c v3 "$STATUS"); [[ "$s" == *"👥 3"* ]] && break; sleep 1; done; sleep 8
+check "mobile : rejoint la session (sans git)" "$(has "$s" "👥 3")$(c v3 'return String(app.plugins.plugins["collab-vault"].git)')" "ouinull"
+c v3 'await app.plugins.disablePlugin("collab-vault"); const f=app.vault.getAbstractFileByPath("Accueil.md"); await app.vault.process(f, t => t.replace("# Note A", "# Note A (titre modifié dans le métro)")); return 1' >/dev/null
+sleep 2; typ v2 $'\nPendant que le téléphone est hors ligne.' false; sleep 3
+c v3 'await app.plugins.enablePlugin("collab-vault"); return 1' >/dev/null
+for i in $(seq 1 40); do s=$(c v3 "$STATUS"); [[ "$s" == *"👥 3"* ]] && break; sleep 1; done; sleep 6
+check "hors ligne : la modif du téléphone arrive chez les autres" "$(grep -c 'titre modifié dans le métro' $E/v1/Accueil.md)" "1"
+check "hors ligne : le téléphone reçoit ce qu'il a manqué" "$(grep -c 'Pendant que le téléphone est hors ligne' $E/v3/Accueil.md)" "1"
+check "hors ligne : même contenu partout" "$(md5sum < $E/v3/Accueil.md)" "$(md5sum < $E/v1/Accueil.md)"
 echo; echo "$ok OK, $ko échec(s)"

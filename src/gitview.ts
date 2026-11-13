@@ -113,6 +113,10 @@ export class GitView extends ItemView {
       setIcon(line.createSpan("cv-icon"), "alert-triangle");
       line.createSpan({ text: "Erreur" });
       card.createDiv({ cls: "cv-error", text: git.lastError.message });
+      if (git.lastError.auth) {
+        const b = card.createEl("button", { text: "Se connecter à GitHub", cls: "mod-cta" });
+        b.onclick = () => p.openGitSetup();
+      }
     } else if (git.status.includes("…")) {
       setIcon(line.createSpan("cv-icon"), "loader");
       line.createSpan({ text: git.status.replace(/^git: /, "") });

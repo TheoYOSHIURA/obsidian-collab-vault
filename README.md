@@ -12,6 +12,29 @@ Plugin Obsidian pour écrire à plusieurs dans un même coffre, en temps réel (
 - **Les images et les PDF** sont transmis aux autres quand ils changent. Un nouveau venu reçoit ceux qui lui manquent.
 - `.obsidian/workspace.json` et les réglages du plugin sont propres à chaque machine : ils sont sortis du dépôt automatiquement.
 
+## Installation
+
+### Ordinateur (Windows, Mac, Linux)
+- **Avec accès au dépôt git du coffre** : clone le dépôt (GitHub Desktop convient), ouvre le dossier dans Obsidian et accepte « Faire confiance à l'auteur ». Le plugin est déjà dedans.
+- **Git et connexion GitHub** : palette de commandes → « Collab Vault : Configurer git et la connexion GitHub ». L'assistant :
+  - installe Git for Windows si besoin (via `winget`, sinon il ouvre la page de téléchargement) ;
+  - règle ton nom et ton e-mail pour les sauvegardes ;
+  - affiche un bouton **Se connecter à GitHub**, qui ouvre la fenêtre de connexion de Git Credential Manager, inclus avec Git for Windows ;
+  - vérifie l'accès au dépôt.
+  Il s'ouvre aussi tout seul, via une notification, si git manque ou si GitHub refuse la connexion.
+  Être connecté dans GitHub Desktop ne suffit pas : le plugin utilise la commande `git` de l'ordinateur.
+
+### Android / iPhone
+Le téléphone participe aux sessions mais ne fait pas de git : ce sont les ordinateurs connectés qui sauvegardent.
+1. Dans Obsidian mobile, crée un coffre vide.
+2. Installe le plugin **BRAT** depuis les plugins communautaires, puis ajoute le plugin beta `TheoYOSHIURA/obsidian-collab-vault`. Si le dépôt est privé, il faut aussi un jeton GitHub dans les réglages de BRAT.
+3. Ouvre le lien d'invitation (`obsidian://collab-vault?...`) : les notes arrivent depuis la session. Il faut qu'un membre soit connecté.
+
+### Modifications hors ligne
+Chaque appareil garde la dernière version partagée des notes, hors git, dans `base-*.json`. Quand il rejoint une session après avoir modifié hors ligne (téléphone dans le métro, PC resté seul), il fait une fusion à trois, comme git :
+- les modifications des deux côtés sont gardées ;
+- si les deux ont modifié les mêmes lignes, la session garde sa version, et l'autre est conservée dans une copie `Note (conflit <nom> <date>).md`.
+
 ## Utilisation
 
 - **Activer** : palette de commandes → « Collab Vault : Activer la collaboration dans ce coffre ». Ça crée `.collab/room.json`, qui contient l'identifiant de la session et son secret.
@@ -30,7 +53,8 @@ Plugin Obsidian pour écrire à plusieurs dans un même coffre, en temps réel (
 - Il faut qu'un membre avec git soit présent pour que le travail de la session soit sauvegardé.
 - Derrière certains réseaux très fermés (NAT symétrique, réseau d'école…), la connexion WebRTC directe peut échouer. Il faudrait alors un serveur TURN.
 - Les relais Nostr publics sont gratuits mais pas garantis.
-- Ordinateur uniquement : pas de version mobile.
+- Sur téléphone : pas de sauvegarde git, la collaboration seulement. Non testé sur un vrai Android : les tests simulent le mode téléphone dans Obsidian sur ordinateur.
+- L'installation automatique de git (`winget`) et la fenêtre de connexion GitHub sont propres à Windows et n'ont pas été testées sur un vrai Windows.
 
 ## Développement
 
@@ -41,4 +65,4 @@ npm test        # tests du cœur de synchro (réseau et disques simulés)
 tools/e2e/scenario.sh   # test de bout en bout dans un vrai Obsidian (profil isolé, 3 coffres)
 ```
 
-`tools/e2e/scenario.sh` lance l'AppImage Obsidian avec un profil séparé et pilote 3 fenêtres (37 vérifications) via le port de débogage 9333.
+`tools/e2e/scenario.sh` lance l'AppImage Obsidian avec un profil séparé et pilote 3 fenêtres (43 vérifications) via le port de débogage 9333.

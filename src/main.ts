@@ -1,6 +1,7 @@
 import {
   App,
   FileSystemAdapter,
+  Platform,
   Modal,
   normalizePath,
   Notice,
@@ -13,8 +14,9 @@ import {
 } from "obsidian";
 import { EditorBinder } from "./editor";
 import { Git } from "./git";
+import { findGit, GitSetup, GitSetupModal } from "./gitsetup";
 import { GIT_VIEW, GitView } from "./gitview";
-import { Disk, isText, Session } from "./session";
+import { BaseStore, Disk, isText, Session } from "./session";
 import { FileOp, TrysteroTransport } from "./transport";
 
 const ROOM_FILE = ".collab/room.json";
@@ -31,6 +33,8 @@ interface Settings {
   pullOnStartup: boolean;
   pullIntervalMin: number;
   notifySuccess: boolean;
+  /** Chemin de git trouvé (Windows : souvent hors du PATH juste après l'installation). */
+  gitPath: string;
 }
 
 interface RoomConfig {
@@ -39,6 +43,8 @@ interface RoomConfig {
 }
 
 export default class CollabVault extends Plugin {
+  /** Pour les tests de bout en bout (simuler un téléphone). */
+  static platform = Platform;
   declare settings: Settings;
   cwd = "";
   git: Git | null = null;
@@ -68,17 +74,15 @@ export default class CollabVault extends Plugin {
         pullOnStartup: true,
         pullIntervalMin: 2,
         notifySuccess: false,
+        gitPath: "",
       },
       await this.loadData(),
     );
     await this.saveData(this.settings);
 
+    // Sur Android/iOS il n'y a pas de dossier accessible ni de git : collaboration seule.
     const adapter = this.app.vault.adapter;
-    if (!(adapter instanceof FileSystemAdapter)) {
-      new Notice("Collab Vault : coffre non local, plugin désactivé.");
-      return;
-    }
-    this.cwd = adapter.getBasePath();
+    if (adapter instanceof FileSystemAdapter) this.cwd = adapter.getBasePath();
 
     this.statusBar = this.addStatusBarItem();
     this.statusBar.addClass("mod-clickable");
@@ -122,15 +126,35 @@ export default class CollabVault extends Plugin {
 
   // ------------------------------------------------------------------ démarrage
 
-  private async startup() {
+  /** Le dossier du coffre contient-il un dépôt git ? (indépendamment de git installé ou non) */
+  hasRepoFolder() {
+    if (!this.cwd || !Platform.isDesktopApp) return false;
+    try {
+      return (require("fs") as typeof import("fs")).existsSync(this.cwd + "/.git");
+    } catch {
+      return false;
+    }
+  }
+
+  /** Détecte git et prépare la sauvegarde. Renvoie le chemin de git (ou null). */
+  async initGit(): Promise<string | null> {
+    this.git = null;
+    if (!Platform.isDesktopApp || !this.cwd) return null;
+    const bin = await findGit(this.settings.gitPath || undefined);
+    if (bin && bin !== this.settings.gitPath) {
+      this.settings.gitPath = bin;
+      await this.saveData(this.settings);
+    }
+    if (!bin) return null;
     const git = new Git(
       this.cwd,
+      bin,
       () => this.settings,
       () => {
         this.updateStatus();
         this.refreshGitView(true);
       },
-      msg => new Notice("Collab Vault : erreur git\n" + msg, 10000),
+      (msg, auth) => this.gitError(msg, auth),
     );
     if (await git.isRepo()) {
       this.git = git;
@@ -138,7 +162,84 @@ export default class CollabVault extends Plugin {
         ".obsidian/workspace.json",
         ".obsidian/workspace-mobile.json",
         `${this.manifest.dir}/data.json`,
+        `${this.manifest.dir}/base-*.json`,
       ]);
+    }
+    return bin;
+  }
+
+  private lastAuthNotice = 0;
+  private gitError(msg: string, auth: boolean) {
+    if (!auth) return void new Notice("Collab Vault : erreur git\n" + msg, 10000);
+    if (Date.now() - this.lastAuthNotice < 10 * 60 * 1000) return; // pas de rafale
+    this.lastAuthNotice = Date.now();
+    this.noticeWithButton("Collab Vault : la sauvegarde ne peut pas se connecter à GitHub.", "Se connecter", () =>
+      this.openGitSetup(),
+    );
+  }
+
+  noticeWithButton(text: string, label: string, onClick: () => void) {
+    const frag = document.createDocumentFragment();
+    frag.createDiv({ text });
+    const btn = frag.createEl("button", { text: label, cls: "mod-cta" });
+    btn.style.marginTop = "8px";
+    const n = new Notice(frag, 0);
+    btn.onclick = () => {
+      n.hide();
+      onClick();
+    };
+  }
+
+  openGitSetup() {
+    new GitSetupModal(this.app, {
+      cwd: this.cwd,
+      hasRepo: () => this.hasRepoFolder(),
+      gitBin: () => this.settings.gitPath || null,
+      redetect: async () => {
+        const bin = await findGit(this.settings.gitPath || undefined);
+        this.settings.gitPath = bin ?? "";
+        await this.saveData(this.settings);
+        return bin;
+      },
+      onReady: () => void this.reloadGit(),
+    }).open();
+  }
+
+  /** Après installation / connexion : on relance git et on se réannonce dans la session (rôle git). */
+  private reloading = false;
+  async reloadGit() {
+    if (this.reloading) return;
+    const hadGit = !!this.git;
+    this.reloading = true;
+    try {
+      await this.initGit();
+      if (this.git && !hadGit) {
+        await this.git.sync(true);
+        if (this.session) {
+          await this.stopSession();
+          await this.startSession();
+        }
+      }
+      this.updateStatus();
+      this.refreshGitView(true);
+    } finally {
+      this.reloading = false;
+    }
+  }
+
+  private async startup() {
+    const bin = await this.initGit();
+    if (this.hasRepoFolder() && !bin) {
+      this.noticeWithButton(
+        "Collab Vault : ce coffre est un dépôt git, mais git n'est pas installé sur cet ordinateur. Sans lui, tes modifs ne sont sauvegardées que si quelqu'un d'autre est connecté.",
+        "Installer / configurer git",
+        () => this.openGitSetup(),
+      );
+    } else if (this.git) {
+      // Vérifie la connexion GitHub en arrière-plan (sans fenêtre).
+      void new GitSetup(this.git.bin, this.cwd).checkAccess().then(r => {
+        if (!r.ok) this.gitError(r.message, true);
+      });
     }
 
     // Les évènements « create » du chargement du coffre sont passés : on peut écouter.
@@ -188,7 +289,13 @@ export default class CollabVault extends Plugin {
       const session = new Session(
         transport,
         this.disk(),
-        { name: this.settings.name, color: this.settings.color, git: !!this.git, joinTimeoutMs: 5000 },
+        {
+          name: this.settings.name,
+          color: this.settings.color,
+          git: !!this.git,
+          joinTimeoutMs: 5000,
+          base: this.baseStore(room.room),
+        },
         {
           isBound: p => this.binder.isBound(p),
           onStructure: () => this.rebind(),
@@ -323,6 +430,16 @@ export default class CollabVault extends Plugin {
   }
 
   // ------------------------------------------------------------------ disque
+
+  /** Dernière version partagée, gardée sur cet appareil (hors git) pour fusionner les modifs hors ligne. */
+  private baseStore(room: string): BaseStore {
+    const path = `${this.manifest.dir}/base-${room.replace(/[^\w-]/g, "")}.json`;
+    const a = this.app.vault.adapter;
+    return {
+      load: async () => ((await a.exists(path)) ? JSON.parse(await a.read(path)) : null),
+      save: async texts => a.write(path, JSON.stringify(texts)),
+    };
+  }
 
   private disk(): Disk {
     const vault = this.app.vault;
@@ -513,6 +630,7 @@ export default class CollabVault extends Plugin {
         ).open();
       },
     });
+    this.addCommand({ id: "git-setup", name: "Configurer git et la connexion GitHub", callback: () => this.openGitSetup() });
     this.addCommand({ id: "git-view", name: "Afficher l'état de la sauvegarde git", callback: () => void this.openGitView() });
     this.addCommand({
       id: "sync-now",
@@ -718,6 +836,16 @@ class SettingsTab extends PluginSettingTab {
 
     containerEl.createEl("h3", { text: "Sauvegarde git" });
     new Setting(containerEl)
+      .setName("Git et connexion GitHub")
+      .setDesc(
+        !Platform.isDesktopApp
+          ? "Pas de git sur téléphone : les ordinateurs de la session sauvegardent."
+          : this.plugin.git
+            ? `git : ${this.plugin.git.bin}`
+            : "Git n'est pas prêt sur cet ordinateur.",
+      )
+      .addButton(b => b.setButtonText("Ouvrir l'assistant").setCta().onClick(() => this.plugin.openGitSetup()));
+    new Setting(containerEl)
       .setName("Délai avant commit (secondes)")
       .setDesc("Attend ce délai sans nouvelle modification avant de commit/push.")
       .addText(t => t.setValue(String(s.delaySeconds)).onChange(v => {
@@ -758,6 +886,7 @@ function randomId(bytes: number) {
 }
 
 function defaultName() {
+  if (!Platform.isDesktopApp) return Platform.isAndroidApp ? "Android" : Platform.isIosApp ? "iPhone" : "Mobile";
   try {
     return require("os").userInfo().username as string;
   } catch {

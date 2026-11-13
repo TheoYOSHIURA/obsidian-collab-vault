@@ -1,6 +1,33 @@
 // Sauvegarde git du coffre (ex-« Auto Git Sync »). Pendant une session, seul le
 // responsable git (le plus ancien membre qui a git) commit et push.
-import { execFile } from "child_process";
+// Modules Node chargés à la demande : ils n'existent pas sur Android/iOS.
+const node = <T>(m: string): T => require(m);
+const cp = () => node<typeof import("child_process")>("child_process");
+const fsm = () => node<typeof import("fs")>("fs");
+
+/** Environnement des commandes en arrière-plan : jamais de question dans un terminal invisible. */
+export const QUIET_ENV = { GIT_TERMINAL_PROMPT: "0", GCM_INTERACTIVE: "never" };
+
+/** L'erreur ressemble-t-elle à un problème de connexion / de droits GitHub ? */
+export function isAuthError(msg: string) {
+  return /Authentication failed|could not read (Username|Password)|terminal prompts disabled|Permission denied|Repository not found|returned error: 40[13]|denied to|Invalid username or password|GCM_INTERACTIVE|cannot prompt/i.test(
+    msg,
+  );
+}
+
+/** Compare deux chemins de dossier (Windows : insensible à la casse et aux / ou \\). */
+export function samePath(a: string, b: string) {
+  const fs = fsm();
+  const norm = (p: string) => {
+    let r = p;
+    try {
+      r = fs.realpathSync.native(p);
+    } catch {}
+    r = r.replace(/\\/g, "/").replace(/\/+$/, "");
+    return process.platform === "win32" ? r.toLowerCase() : r;
+  };
+  return norm(a) === norm(b);
+}
 
 export interface GitSettings {
   commitMessage: string;
@@ -36,14 +63,15 @@ export class Git {
   private syncQueued = false;
   private queuedAlwaysPull = false;
   status = "git: ok";
-  lastError: { message: string; at: number } | null = null;
+  lastError: { message: string; at: number; auth: boolean } | null = null;
   lastOk: number | null = null;
 
   constructor(
     readonly cwd: string,
+    readonly bin: string,
     readonly settings: () => GitSettings,
     readonly onStatus: (s: string) => void,
-    readonly onError: (msg: string) => void,
+    readonly onError: (msg: string, auth: boolean) => void,
   ) {}
 
   run(args: string[]): Promise<string> {
@@ -53,7 +81,8 @@ export class Git {
   /** Sortie brute (sans trim : indispensable pour les formats -z / porcelain). */
   runRaw(args: string[]): Promise<string> {
     return new Promise((resolve, reject) => {
-      execFile("git", args, { cwd: this.cwd, maxBuffer: 50 * 1024 * 1024 }, (err, stdout, stderr) => {
+      const env = { ...process.env, ...QUIET_ENV };
+      cp().execFile(this.bin, args, { cwd: this.cwd, env, maxBuffer: 50 * 1024 * 1024, windowsHide: true }, (err, stdout, stderr) => {
         if (err) reject(new Error((stderr || stdout || err.message).trim()));
         else resolve(stdout);
       });
@@ -68,9 +97,7 @@ export class Git {
   /** Le coffre est-il la racine d'un dépôt ? (pas juste un sous-dossier d'un autre dépôt) */
   async isRepo() {
     try {
-      const fs = require("fs") as typeof import("fs");
-      const top = await this.run(["rev-parse", "--show-toplevel"]);
-      return fs.realpathSync(top) === fs.realpathSync(this.cwd);
+      return samePath(await this.run(["rev-parse", "--show-toplevel"]), this.cwd);
     } catch {
       return false;
     }
@@ -96,9 +123,10 @@ export class Git {
         await fn();
       } catch (e: any) {
         if (quiet) return console.warn("[collab-vault]", e);
-        this.lastError = { message: e.message, at: Date.now() };
-        this.set("git: erreur ⚠");
-        this.onError(e.message);
+        const auth = isAuthError(e.message);
+        this.lastError = { message: e.message, at: Date.now(), auth };
+        this.set(auth ? "git: connexion GitHub ⚠" : "git: erreur ⚠");
+        this.onError(e.message, auth);
         console.error("[collab-vault]", e);
       }
     });
@@ -191,7 +219,7 @@ export class Git {
     // (notre disque = l'état de la session, le plus récent). Sinon la sauvegarde resterait bloquée.
     try {
       await this.run(["pull", "--no-rebase", "--no-edit", "-X", "ours"]);
-      this.onError("conflit avec le dépôt distant : fusion faite en gardant la version de la session.");
+      this.onError("conflit avec le dépôt distant : fusion faite en gardant la version de la session.", false);
     } catch (e: any) {
       await this.run(["merge", "--abort"]).catch(() => {});
       throw new Error("pull impossible (conflit) : " + e.message);
@@ -200,7 +228,7 @@ export class Git {
 
   /** Fichiers propres à chaque machine : jamais versionnés, sinon conflits entre amis. */
   async ensureIgnored(paths: string[]) {
-    const fs = require("fs") as typeof import("fs");
+    const fs = fsm();
     const file = this.cwd + "/.gitignore";
     const current = fs.existsSync(file) ? fs.readFileSync(file, "utf8") : "";
     const lines = new Set(current.split(/\r?\n/).map(l => l.trim()));
