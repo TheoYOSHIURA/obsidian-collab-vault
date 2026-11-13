@@ -95,6 +95,9 @@ export class GitView extends ItemView {
       box.createDiv({ text: "Ce coffre n'utilise pas git." });
       if (leader) box.createDiv({ cls: "cv-muted", text: `${leader.name} sauvegarde la session.` });
       else if (s?.seeded) box.createDiv({ cls: "cv-warn", text: "Personne avec git n'est connecté : rien n'est sauvegardé." });
+      const b = box.createEl("button", { text: "Configurer la sauvegarde git" });
+      b.style.marginTop = "6px";
+      b.onclick = () => p.openGitSetup();
       return;
     }
     const info = this.info;

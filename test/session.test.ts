@@ -103,6 +103,27 @@ async function main() {
   check("les sessions parallèles fusionnent en une seule", origins.size === 1, Array.from(origins));
   check("pas de texte dupliqué après fusion", hub2Disk2.files.get("x.md") === undefined || !hub2Disk2.files.get("x.md")!.includes("XX"));
 
+  // Un téléphone avec git arrivé en premier ne sauvegarde pas si un ordinateur avec git est là
+  {
+    const h3 = new Hub();
+    const mk = (id: string, mobile: boolean) => {
+      const t = new FakeTransport(h3, id);
+      const sess = new Session(t, new MemDisk({ "n.md": "x" }), { name: id, color: "#000", git: true, gitMobile: mobile, joinTimeoutMs: 50 }, {
+        isBound: () => false, onStructure: () => {}, onPeers: () => {}, log: () => {},
+      });
+      h3.connect(t);
+      sess.start();
+      return sess;
+    };
+    const tel = mk("tel", true);
+    await sleep(150);
+    check("téléphone seul : il sauvegarde", tel.gitLeader()?.id === "tel");
+    const pc2 = mk("pc", false);
+    await sleep(200);
+    check("un ordinateur arrive : c'est lui qui sauvegarde", tel.gitLeader()?.id === "pc" && pc2.gitLeader()?.id === "pc" && tel.host()?.id === "tel");
+    await Promise.all([tel.stop(), pc2.stop()]);
+  }
+
   await Promise.all([B.stop(), C.stop(), D.stop(), E.stop()]);
   console.log(failed() ? `\n${failed()} échec(s)` : "\nTout est OK");
   process.exit(failed() ? 1 : 0);

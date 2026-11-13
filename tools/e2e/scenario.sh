@@ -13,6 +13,9 @@ typ() { local js; js=$(node -e 'console.log(JSON.stringify(process.argv[1]))' "$
 has() { [[ "${1,,}" == *"${2,,}"* ]] && echo oui || echo "non ($1)"; }
 
 stop_test_obsidian; ./setup.sh
+# serveur git HTTP à jeton (comme GitHub) devant le dépôt de test, pour le git du téléphone
+node $T/githttp.mjs $E 18766 jeton-e2e > $E/githttp.log 2>&1 &
+GITHTTP=$!; trap "kill $GITHTTP 2>/dev/null" EXIT
 ("${OBSIDIAN:-$HOME/AppImages/Obsidian-1.15.1.AppImage}" --user-data-dir=$E/userdata --remote-debugging-port=9333 > $E/obsidian.log 2>&1 &)
 for i in $(seq 1 30); do curl -s http://127.0.0.1:9333/json 2>/dev/null | grep -q '"page"' && break; sleep 1; done; sleep 4
 c v1 'app.plugins.setEnable(true); return 1' >/dev/null; sleep 3; c v2 'app.plugins.setEnable(true); return 1' >/dev/null; c v3 'app.plugins.setEnable(true); return 1' >/dev/null
@@ -22,7 +25,7 @@ check "v2 rejoint la session de v1" "$(has "$(c v2 "$STATUS")" "👥 2 · invit�
 
 OPEN='await app.workspace.openLinkText("a.md",""); await new Promise(r=>setTimeout(r,800)); return 1'
 c v1 "$OPEN" >/dev/null; c v2 "$OPEN" >/dev/null
-typ v1 $'\nTexte de v1.' false & typ v2 $'> ' true; wait; sleep 2
+typ v1 $'\nTexte de v1.' false & P1=$!; typ v2 $'> ' true; wait $P1; sleep 2
 ED='return app.workspace.activeEditor.editor.getValue()'
 check "frappe simultanée : mêmes éditeurs" "$(c v1 "$ED" | md5sum)" "$(c v2 "$ED" | md5sum)"
 
@@ -119,11 +122,38 @@ ROOM=$(cat $E/v1/.collab/room.json)
 c v3 'const r='"$ROOM"'; app.plugins.plugins["collab-vault"].handleInviteLink({room:r.room, secret:r.secret, name:"Test"}); await new Promise(r=>setTimeout(r,500)); [...[...document.querySelectorAll(".modal-container")].at(-1).querySelectorAll("button")].find(b=>b.textContent==="Rejoindre").click(); return 1' >/dev/null
 for i in $(seq 1 40); do s=$(c v3 "$STATUS"); [[ "$s" == *"👥 3"* ]] && break; sleep 1; done; sleep 8
 check "mobile : rejoint la session (sans git)" "$(has "$s" "👥 3")$(c v3 'return String(app.plugins.plugins["collab-vault"].git)')" "ouinull"
-c v3 'await app.plugins.disablePlugin("collab-vault"); const f=app.vault.getAbstractFileByPath("Accueil.md"); await app.vault.process(f, t => t.replace("# Note A", "# Note A (titre modifié dans le métro)")); return 1' >/dev/null
+# (on laisse l'éditeur finir sa sauvegarde différée d'Obsidian avant de modifier le fichier « hors ligne »,
+#  sinon cette sauvegarde en retard écrase la modif : artefact du test, pas du plugin)
+c v3 'await app.plugins.disablePlugin("collab-vault"); await new Promise(r=>setTimeout(r,3000)); const f=app.vault.getAbstractFileByPath("Accueil.md"); await app.vault.process(f, t => t.replace("# Note A", "# Note A (titre modifié dans le métro)")); return 1' >/dev/null
 sleep 2; typ v2 $'\nPendant que le téléphone est hors ligne.' false; sleep 3
+echo "   (v3 hors ligne, disque avant retour : $(head -1 $E/v3/Accueil.md) / base : $(python3 -c "import json,glob; [print(repr(json.load(open(f)).get('Accueil.md','?')[:40])) for f in glob.glob('$E/v3/.obsidian/plugins/collab-vault/base-*.json')]" | tr '\n' ' '))"
 c v3 'await app.plugins.enablePlugin("collab-vault"); return 1' >/dev/null
 for i in $(seq 1 40); do s=$(c v3 "$STATUS"); [[ "$s" == *"👥 3"* ]] && break; sleep 1; done; sleep 6
 check "hors ligne : la modif du téléphone arrive chez les autres" "$(grep -c 'titre modifié dans le métro' $E/v1/Accueil.md)" "1"
+[ "$(grep -c 'titre modifié dans le métro' $E/v1/Accueil.md)" = 1 ] || { echo "   DIAG lastJoin v3: $(c v3 'return JSON.stringify(app.plugins.plugins["collab-vault"].session?.lastJoin)')"; echo "   DIAG disque v3: $(head -1 $E/v3/Accueil.md)"; echo "   DIAG base v3: $(python3 -c "import json,glob; [print(f[-30:], repr(json.load(open(f)).get('Accueil.md','?')[:50])) for f in glob.glob('$E/v3/.obsidian/plugins/collab-vault/base-*.json')]")"; }
 check "hors ligne : le téléphone reçoit ce qu'il a manqué" "$(grep -c 'Pendant que le téléphone est hors ligne' $E/v3/Accueil.md)" "1"
 check "hors ligne : même contenu partout" "$(md5sum < $E/v3/Accueil.md)" "$(md5sum < $E/v1/Accueil.md)"
+
+# git sur le téléphone (v3) : jeton GitHub via la fenêtre de configuration
+FILL='const [repo, token] = ARGS; app.plugins.plugins["collab-vault"].openGitSetup(); await new Promise(r=>setTimeout(r,800)); const c=[...document.querySelectorAll(".modal-container")].at(-1); const inp=[...c.querySelectorAll("input")]; const vals=[repo, token, "Tel E2E", "tel@e2e"]; inp.forEach((i,k)=>{ i.value=vals[k]; i.dispatchEvent(new Event("input")); }); [...c.querySelectorAll("button")].find(b=>/Brancher|Enregistrer/.test(b.textContent)).click(); await new Promise(r=>setTimeout(r,8000)); const still=document.body.contains(c); const t=c.innerText; if (still) c.querySelector(".modal-close-button")?.click(); return (still ? "OUVERT " : "FERMÉ ") + t.split("\\n").filter(l=>/❌|✅/.test(l)).join(" ")'
+OUT=$(c v3 "${FILL/ARGS/'["http://127.0.0.1:18766/remote.git", "mauvais-jeton"]'}")
+check "téléphone : mauvais jeton refusé" "$(has "$OUT" "OUVERT")$(has "$OUT" "refuse l'accès")" "ouioui"
+OUT=$(c v3 "${FILL/ARGS/'["http://127.0.0.1:18766/remote.git", "jeton-e2e"]'}")
+check "téléphone : branché sur le dépôt" "$(has "$OUT" "FERMÉ")$(test -f $E/v3/.git/HEAD && echo oui)" "ouioui"
+for i in $(seq 1 40); do s=$(c v3 "$STATUS"); [[ "$s" == *"👥 3"* ]] && break; sleep 1; done; sleep 3
+check "téléphone avec git : un ordinateur sauvegarde quand même" "$(has "$(c v3 "$STATUS")" "sauvegarde")$(c v3 'const s=app.plugins.plugins["collab-vault"].session; return String(s.gitLeader()?.mobile)')" "ouifalse"
+c v1 'await app.plugins.disablePlugin("collab-vault"); return 1' >/dev/null; c v2 'await app.plugins.disablePlugin("collab-vault"); return 1' >/dev/null; sleep 4
+check "téléphone seul : il sauvegarde lui-même" "$(c v3 'return String(app.plugins.plugins["collab-vault"].isGitLeader())')" "true"
+c v3 'await app.workspace.openLinkText("Accueil.md",""); await new Promise(r=>setTimeout(r,800)); return 1' >/dev/null
+typ v3 $'\nÉcrit et poussé par le téléphone.' false
+for i in $(seq 1 60); do git -C $E/remote.git show HEAD:Accueil.md 2>/dev/null | grep -q 'poussé par le téléphone' && break; sleep 1; done
+check "téléphone : commit poussé sur le dépôt" "$(git -C $E/remote.git log -1 --format=%an)" "Tel E2E"
+check "téléphone : le contenu poussé est le bon" "$(git -C $E/remote.git show HEAD:Accueil.md | grep -c 'poussé par le téléphone')" "1"
+check "téléphone : réglages et base jamais versionnés" "$(git -C $E/remote.git ls-tree -r --name-only HEAD | grep -cE 'collab-vault/(data|base-)')" "0"
+c v1 'await app.plugins.enablePlugin("collab-vault"); return 1' >/dev/null
+for i in $(seq 1 40); do s=$(c v1 "$STATUS"); [[ "$s" == *"👥 2"* ]] && break; sleep 1; done; sleep 4
+check "l'ordinateur revient : il a le travail du téléphone" "$(grep -c 'poussé par le téléphone' $E/v1/Accueil.md)" "1"
+check "l'ordinateur reprend la sauvegarde" "$(c v3 'const s=app.plugins.plugins["collab-vault"].session; return s.gitLeader()?.name')" "v1"
+PANEL=$(c v3 'app.commands.executeCommandById("collab-vault:git-view"); await new Promise(r=>setTimeout(r,5000)); return app.workspace.getLeavesOfType("collab-vault-git")[0].view.contentEl.innerText')
+check "panneau git du téléphone" "$(has "$PANEL" "Tel E2E")$(has "$PANEL" "historique")" "ouioui"
 echo; echo "$ok OK, $ko échec(s)"

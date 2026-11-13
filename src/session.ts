@@ -37,6 +37,8 @@ export interface Hello {
   origin: string | null;
   originAt: number;
   git: boolean;
+  /** git « de téléphone » (isomorphic-git) : on préfère qu'un ordinateur sauvegarde. */
+  mobile?: boolean;
   name: string;
   clientId: number;
 }
@@ -70,6 +72,7 @@ export interface SessionOptions {
   name: string;
   color: string;
   git: boolean;
+  gitMobile?: boolean;
   /** Temps d'attente d'un hôte avant de devenir soi-même l'hôte. */
   joinTimeoutMs: number;
   writeDelayMs?: number;
@@ -82,6 +85,7 @@ export interface Member {
   self: boolean;
   name: string;
   git: boolean;
+  mobile: boolean;
   startedAt: number;
 }
 
@@ -156,11 +160,11 @@ export class Session {
   members(): Member[] {
     const list: Member[] = [];
     if (this.seeded) {
-      list.push({ id: this.selfId, self: true, name: this.opts.name, git: this.opts.git, startedAt: this.startedAt });
+      list.push({ id: this.selfId, self: true, name: this.opts.name, git: this.opts.git, mobile: !!this.opts.gitMobile, startedAt: this.startedAt });
     }
     for (const [id, h] of this.peers) {
       if (h.seeded && this.origin && h.origin === this.origin) {
-        list.push({ id, self: false, name: h.name, git: h.git, startedAt: h.startedAt });
+        list.push({ id, self: false, name: h.name, git: h.git, mobile: !!h.mobile, startedAt: h.startedAt });
       }
     }
     return list.sort((a, b) => a.startedAt - b.startedAt || (a.id < b.id ? -1 : 1));
@@ -170,9 +174,10 @@ export class Session {
     return this.members()[0];
   }
 
-  /** Le pair chargé de commit/push : le plus ancien membre qui a git. */
+  /** Le pair chargé de commit/push : le plus ancien ordinateur avec git, sinon le plus ancien téléphone avec git. */
   gitLeader(): Member | undefined {
-    return this.members().find(m => m.git);
+    const m = this.members();
+    return m.find(x => x.git && !x.mobile) ?? m.find(x => x.git);
   }
 
   // ---------------------------------------------------------------- doc
@@ -226,6 +231,7 @@ export class Session {
       origin: this.origin,
       originAt: this.originAt,
       git: this.opts.git,
+      mobile: !!this.opts.gitMobile,
       name: this.opts.name,
       clientId: this.doc.clientID,
     };

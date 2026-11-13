@@ -13,7 +13,10 @@ import {
   TFolder,
 } from "obsidian";
 import { EditorBinder } from "./editor";
-import { Git } from "./git";
+import { Git, GitBase } from "./git";
+import { MobileGit } from "./mobilegit";
+import { MobileGitSetupModal } from "./mobilesetup";
+import { obsidianFs, obsidianHttp } from "./obsfs";
 import { findGit, GitSetup, GitSetupModal } from "./gitsetup";
 import { GIT_VIEW, GitView } from "./gitview";
 import { BaseStore, Disk, isText, Session } from "./session";
@@ -35,11 +38,18 @@ interface Settings {
   notifySuccess: boolean;
   /** Chemin de git trouvé (Windows : souvent hors du PATH juste après l'installation). */
   gitPath: string;
+  /** Téléphone : dépôt, jeton GitHub et identité des commits (jamais versionnés). */
+  mobileRepo: string;
+  githubToken: string;
+  authorName: string;
+  authorEmail: string;
 }
 
 interface RoomConfig {
   room: string;
   secret: string;
+  /** Adresse https du dépôt, pour pré-remplir la config git des téléphones. */
+  repo?: string;
 }
 
 export default class CollabVault extends Plugin {
@@ -47,7 +57,7 @@ export default class CollabVault extends Plugin {
   static platform = Platform;
   declare settings: Settings;
   cwd = "";
-  git: Git | null = null;
+  git: GitBase | null = null;
   session: Session | null = null;
   transport: TrysteroTransport | null = null;
   binder = new EditorBinder();
@@ -75,6 +85,10 @@ export default class CollabVault extends Plugin {
         pullIntervalMin: 2,
         notifySuccess: false,
         gitPath: "",
+        mobileRepo: "",
+        githubToken: "",
+        authorName: "",
+        authorEmail: "",
       },
       await this.loadData(),
     );
@@ -137,33 +151,64 @@ export default class CollabVault extends Plugin {
   }
 
   /** Détecte git et prépare la sauvegarde. Renvoie le chemin de git (ou null). */
+  private ignored() {
+    return [
+      ".obsidian/workspace.json",
+      ".obsidian/workspace-mobile.json",
+      `${this.manifest.dir}/data.json`,
+      `${this.manifest.dir}/base-*.json`,
+    ];
+  }
+
+  private gitCallbacks() {
+    return [
+      () => this.settings,
+      () => {
+        this.updateStatus();
+        this.refreshGitView(true);
+      },
+      (msg: string, auth: boolean) => this.gitError(msg, auth),
+    ] as const;
+  }
+
+  private mobileGit() {
+    return new MobileGit(
+      {
+        fs: obsidianFs(this.app),
+        http: obsidianHttp,
+        dir: "/",
+        token: () => this.settings.githubToken,
+        author: () => ({
+          name: this.settings.authorName || this.settings.name,
+          email: this.settings.authorEmail || "mobile@collab-vault",
+        }),
+      },
+      ...this.gitCallbacks(),
+    );
+  }
+
   async initGit(): Promise<string | null> {
     this.git = null;
-    if (!Platform.isDesktopApp || !this.cwd) return null;
+    if (!Platform.isDesktopApp) {
+      // Téléphone : git intégré, seulement si un jeton est configuré.
+      if (!this.settings.githubToken) return null;
+      const mg = this.mobileGit();
+      if (!(await mg.isRepo())) return null;
+      this.git = mg;
+      await mg.ensureIgnored(this.ignored());
+      return "mobile";
+    }
+    if (!this.cwd) return null;
     const bin = await findGit(this.settings.gitPath || undefined);
     if (bin && bin !== this.settings.gitPath) {
       this.settings.gitPath = bin;
       await this.saveData(this.settings);
     }
     if (!bin) return null;
-    const git = new Git(
-      this.cwd,
-      bin,
-      () => this.settings,
-      () => {
-        this.updateStatus();
-        this.refreshGitView(true);
-      },
-      (msg, auth) => this.gitError(msg, auth),
-    );
+    const git = new Git(this.cwd, bin, ...this.gitCallbacks());
     if (await git.isRepo()) {
       this.git = git;
-      await git.ensureIgnored([
-        ".obsidian/workspace.json",
-        ".obsidian/workspace-mobile.json",
-        `${this.manifest.dir}/data.json`,
-        `${this.manifest.dir}/base-*.json`,
-      ]);
+      await git.ensureIgnored(this.ignored());
     }
     return bin;
   }
@@ -191,6 +236,7 @@ export default class CollabVault extends Plugin {
   }
 
   openGitSetup() {
+    if (!Platform.isDesktopApp) return void this.openMobileGitSetup();
     new GitSetupModal(this.app, {
       cwd: this.cwd,
       hasRepo: () => this.hasRepoFolder(),
@@ -205,16 +251,43 @@ export default class CollabVault extends Plugin {
     }).open();
   }
 
+  private async openMobileGitSetup() {
+    const room = await this.readRoom();
+    const s = this.settings;
+    new MobileGitSetupModal(this.app, {
+      repo: s.mobileRepo || room?.repo || (this.git ? await this.git.remoteUrl() : ""),
+      token: s.githubToken,
+      name: s.authorName || s.name,
+      email: s.authorEmail,
+      connected: !!this.git,
+      save: async (v, onProgress) => {
+        Object.assign(s, { mobileRepo: v.repo, githubToken: v.token, authorName: v.name, authorEmail: v.email });
+        await this.saveData(s);
+        const mg = this.mobileGit();
+        await mg.connect(v.repo, onProgress);
+        await mg.ensureIgnored(this.ignored());
+        this.git = null; // pour que reloadGit relance la session avec le rôle git
+        await this.reloadGit();
+      },
+      disconnect: async () => {
+        s.githubToken = "";
+        await this.saveData(s);
+        this.git = null;
+        await this.reloadGit(true);
+      },
+    }).open();
+  }
+
   /** Après installation / connexion : on relance git et on se réannonce dans la session (rôle git). */
   private reloading = false;
-  async reloadGit() {
+  async reloadGit(force = false) {
     if (this.reloading) return;
     const hadGit = !!this.git;
     this.reloading = true;
     try {
       await this.initGit();
-      if (this.git && !hadGit) {
-        await this.git.sync(true);
+      if ((this.git && !hadGit) || force) {
+        if (this.git && this.isGitLeader()) await this.git.sync(true);
         if (this.session) {
           await this.stopSession();
           await this.startSession();
@@ -235,9 +308,13 @@ export default class CollabVault extends Plugin {
         "Installer / configurer git",
         () => this.openGitSetup(),
       );
-    } else if (this.git) {
+    } else if (this.git instanceof Git) {
       // Vérifie la connexion GitHub en arrière-plan (sans fenêtre).
       void new GitSetup(this.git.bin, this.cwd).checkAccess().then(r => {
+        if (!r.ok) this.gitError(r.message, true);
+      });
+    } else if (this.git instanceof MobileGit) {
+      void MobileGit.checkAccess(obsidianHttp, await this.git.remoteUrl(), this.settings.githubToken).then(r => {
         if (!r.ok) this.gitError(r.message, true);
       });
     }
@@ -274,6 +351,12 @@ export default class CollabVault extends Plugin {
   }
 
   async writeRoom(r: RoomConfig) {
+    if (!r.repo) {
+      const url = this.git ? await this.git.remoteUrl() : "";
+      // Adresse https publique uniquement (sans identifiant), pour les téléphones.
+      if (/^https?:\/\//.test(url)) r.repo = url.replace(/\/\/[^@/]+@/, "//");
+      else if (/^git@github\.com:/.test(url)) r.repo = url.replace(/^git@github\.com:/, "https://github.com/");
+    }
     if (!(await this.app.vault.adapter.exists(".collab"))) await this.app.vault.adapter.mkdir(".collab");
     await this.app.vault.adapter.write(ROOM_FILE, JSON.stringify(r, null, 2) + "\n");
   }
@@ -293,6 +376,7 @@ export default class CollabVault extends Plugin {
           name: this.settings.name,
           color: this.settings.color,
           git: !!this.git,
+          gitMobile: !!this.git?.mobile,
           joinTimeoutMs: 5000,
           base: this.baseStore(room.room),
         },
@@ -664,7 +748,7 @@ export default class CollabVault extends Plugin {
   }
 
   private handleInviteLink(params: Record<string, string>) {
-    const { room, secret, name } = params;
+    const { room, secret, name, repo } = params;
     if (!room || !secret) return new Notice("Lien d'invitation invalide.");
     new ConfirmModal(
       this.app,
@@ -672,7 +756,7 @@ export default class CollabVault extends Plugin {
       `Ce coffre (« ${this.app.vault.getName()} ») sera synchronisé avec la session : les notes partagées y seront écrites et remplacent les versions locales qui portent le même nom.`,
       async () => {
         await this.stopSession();
-        await this.writeRoom({ room, secret });
+        await this.writeRoom({ room, secret, repo: repo || undefined });
         await this.startSession();
       },
     ).open();
@@ -754,7 +838,10 @@ class InviteModal extends Modal {
   }
   onOpen() {
     const { contentEl } = this;
-    const link = `obsidian://collab-vault?room=${encodeURIComponent(this.room.room)}&secret=${encodeURIComponent(this.room.secret)}&name=${encodeURIComponent(this.vaultName)}`;
+    const link =
+      `obsidian://collab-vault?room=${encodeURIComponent(this.room.room)}&secret=${encodeURIComponent(this.room.secret)}` +
+      `&name=${encodeURIComponent(this.vaultName)}` +
+      (this.room.repo ? `&repo=${encodeURIComponent(this.room.repo)}` : "");
     contentEl.createEl("h3", { text: "Inviter quelqu'un" });
 
     const gh = this.remote.match(/github\.com[:/]([^/]+)\/([^/.]+)/);
@@ -839,9 +926,11 @@ class SettingsTab extends PluginSettingTab {
       .setName("Git et connexion GitHub")
       .setDesc(
         !Platform.isDesktopApp
-          ? "Pas de git sur téléphone : les ordinateurs de la session sauvegardent."
+          ? this.plugin.git
+            ? "Sauvegarde git intégrée active (jeton GitHub). Les ordinateurs de la session sauvegardent en priorité."
+            : "Optionnel : branche ce téléphone sur le dépôt avec un jeton GitHub pour qu'il sauvegarde quand il est seul."
           : this.plugin.git
-            ? `git : ${this.plugin.git.bin}`
+            ? `git : ${this.plugin.git.label}`
             : "Git n'est pas prêt sur cet ordinateur.",
       )
       .addButton(b => b.setButtonText("Ouvrir l'assistant").setCta().onClick(() => this.plugin.openGitSetup()));

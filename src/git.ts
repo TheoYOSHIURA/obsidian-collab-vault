@@ -58,21 +58,124 @@ export interface GitInfo {
   log: Commit[];
 }
 
-export class Git {
+/**
+ * Partie commune aux deux moteurs git (programme `git` sur ordinateur, isomorphic-git sur
+ * téléphone) : opérations une par une, statut, erreurs, regroupement des synchros.
+ */
+export abstract class GitBase {
   private chain: Promise<void> = Promise.resolve();
   private syncQueued = false;
   private queuedAlwaysPull = false;
   status = "git: ok";
   lastError: { message: string; at: number; auth: boolean } | null = null;
   lastOk: number | null = null;
+  /** Description affichée (chemin de git, ou « git intégré »). */
+  abstract readonly label: string;
+  /** true pour le moteur téléphone : on préfère qu'un ordinateur sauvegarde. */
+  abstract readonly mobile: boolean;
 
   constructor(
-    readonly cwd: string,
-    readonly bin: string,
     readonly settings: () => GitSettings,
     readonly onStatus: (s: string) => void,
     readonly onError: (msg: string, auth: boolean) => void,
   ) {}
+
+  abstract isRepo(): Promise<boolean>;
+  abstract remoteUrl(): Promise<string>;
+  abstract ensureIgnored(paths: string[]): Promise<void>;
+  abstract info(): Promise<GitInfo>;
+  abstract commitFiles(hash: string): Promise<Change[]>;
+  protected abstract doSync(alwaysPull: boolean): Promise<void>;
+  protected abstract doPull(): Promise<void>;
+  protected abstract doAdopt(): Promise<void>;
+  protected abstract doFetch(): Promise<void>;
+
+  protected set(s: string) {
+    this.status = s;
+    if (s.startsWith("git: ok")) {
+      this.lastOk = Date.now();
+      this.lastError = null;
+    }
+    this.onStatus(s);
+  }
+
+  /** Les opérations git passent une par une, dans l'ordre. `quiet` : pas de notification d'erreur. */
+  protected exclusive(fn: () => Promise<void>, quiet = false): Promise<void> {
+    this.chain = this.chain.then(async () => {
+      try {
+        await fn();
+      } catch (e: any) {
+        if (quiet) return console.warn("[collab-vault]", e);
+        const auth = isAuthError(e.message);
+        this.lastError = { message: e.message, at: Date.now(), auth };
+        this.set(auth ? "git: connexion GitHub ⚠" : "git: erreur ⚠");
+        this.onError(e.message, auth);
+        console.error("[collab-vault]", e);
+      }
+    });
+    return this.chain;
+  }
+
+  /** Met à jour la vue du dépôt distant (sans toucher aux fichiers). */
+  fetch() {
+    return this.exclusive(() => this.doFetch(), true);
+  }
+
+  pull() {
+    return this.exclusive(async () => {
+      this.set("git: pull…");
+      await this.doPull();
+      this.set("git: ok " + time());
+    });
+  }
+
+  /** Commit des changements, puis pull + push. `alwaysPull` : récupère aussi s'il n'y a rien à pousser. */
+  sync(alwaysPull = false) {
+    this.queuedAlwaysPull ||= alwaysPull;
+    if (this.syncQueued) return this.chain; // une synchro est déjà prévue, elle prendra tout
+    this.syncQueued = true;
+    return this.exclusive(async () => {
+      this.syncQueued = false;
+      const pull = this.queuedAlwaysPull;
+      this.queuedAlwaysPull = false;
+      await this.doSync(pull);
+      this.set("git: ok " + time());
+    });
+  }
+
+  /**
+   * On devient responsable git après avoir été simple invité : le disque reflète déjà
+   * la session (plus récent que tout), on aligne juste l'historique sur le distant sans
+   * toucher aux fichiers, puis on commit la différence.
+   */
+  adopt() {
+    return this.exclusive(async () => {
+      this.set("git: reprise…");
+      await this.doAdopt();
+      this.set("git: ok");
+    }).then(() => this.sync());
+  }
+
+  protected commitMessage(count: number) {
+    return this.settings().commitMessage.replace("{{date}}", date()).replace("{{count}}", String(count));
+  }
+}
+
+export class Git extends GitBase {
+  readonly mobile = false;
+  get label() {
+    return this.bin;
+  }
+
+  constructor(
+    readonly cwd: string,
+    readonly bin: string,
+    settings: () => GitSettings,
+    onStatus: (s: string) => void,
+    onError: (msg: string, auth: boolean) => void,
+  ) {
+    super(settings, onStatus, onError);
+  }
 
   run(args: string[]): Promise<string> {
     return this.runRaw(args).then(s => s.trim());
@@ -107,35 +210,8 @@ export class Git {
     return this.run(["remote", "get-url", "origin"]).catch(() => "");
   }
 
-  private set(s: string) {
-    this.status = s;
-    if (s.startsWith("git: ok")) {
-      this.lastOk = Date.now();
-      this.lastError = null;
-    }
-    this.onStatus(s);
-  }
-
-  /** Les opérations git passent une par une, dans l'ordre. `quiet` : pas de notification d'erreur. */
-  private exclusive(fn: () => Promise<void>, quiet = false): Promise<void> {
-    this.chain = this.chain.then(async () => {
-      try {
-        await fn();
-      } catch (e: any) {
-        if (quiet) return console.warn("[collab-vault]", e);
-        const auth = isAuthError(e.message);
-        this.lastError = { message: e.message, at: Date.now(), auth };
-        this.set(auth ? "git: connexion GitHub ⚠" : "git: erreur ⚠");
-        this.onError(e.message, auth);
-        console.error("[collab-vault]", e);
-      }
-    });
-    return this.chain;
-  }
-
-  /** Met à jour la vue du dépôt distant (sans toucher aux fichiers). */
-  fetch() {
-    return this.exclusive(() => this.run(["fetch", "--quiet"]).then(() => {}), true);
+  protected doFetch() {
+    return this.run(["fetch", "--quiet"]).then(() => {});
   }
 
   async info(): Promise<GitInfo> {
@@ -243,68 +319,39 @@ export class Git {
     }
   }
 
-  pull() {
-    return this.exclusive(async () => {
-      this.set("git: pull…");
-      await this.pullRebase();
-      this.set("git: ok " + time());
-    });
+  protected doPull() {
+    return this.pullRebase();
   }
 
-  /** Commit des changements, puis pull + push. `alwaysPull` : récupère aussi s'il n'y a rien à pousser. */
-  sync(alwaysPull = false) {
-    this.queuedAlwaysPull ||= alwaysPull;
-    if (this.syncQueued) return this.chain; // une synchro est déjà prévue, elle prendra tout
-    this.syncQueued = true;
-    return this.exclusive(async () => {
-      this.syncQueued = false;
-      alwaysPull = this.queuedAlwaysPull;
-      this.queuedAlwaysPull = false;
-      const s = this.settings();
-      await this.run(["add", "-A"]);
-      const status = await this.run(["status", "--porcelain"]);
-      if (status) {
-        const count = status.split("\n").length;
-        const msg = s.commitMessage.replace("{{date}}", date()).replace("{{count}}", String(count));
-        this.set("git: commit…");
-        await this.run(["commit", "-m", msg]);
+  protected async doSync(alwaysPull: boolean) {
+    const s = this.settings();
+    await this.run(["add", "-A"]);
+    const status = await this.run(["status", "--porcelain"]);
+    if (status) {
+      this.set("git: commit…");
+      await this.run(["commit", "-m", this.commitMessage(status.split("\n").length)]);
+    }
+    if (!s.push) return;
+    const ahead = await this.run(["rev-list", "--count", "@{u}..HEAD"]).catch(() => "1");
+    if (ahead !== "0" || alwaysPull) {
+      if (s.pullBeforePush || alwaysPull) {
+        this.set("git: pull…");
+        await this.pullRebase();
       }
-      if (!s.push) {
-        this.set("git: ok " + time());
-        return;
+      const aheadNow = await this.run(["rev-list", "--count", "@{u}..HEAD"]).catch(() => "1");
+      if (aheadNow !== "0") {
+        this.set("git: push…");
+        await this.run(["push"]);
       }
-      const ahead = await this.run(["rev-list", "--count", "@{u}..HEAD"]).catch(() => "1");
-      if (ahead !== "0" || alwaysPull) {
-        if (s.pullBeforePush || alwaysPull) {
-          this.set("git: pull…");
-          await this.pullRebase();
-        }
-        const aheadNow = await this.run(["rev-list", "--count", "@{u}..HEAD"]).catch(() => "1");
-        if (aheadNow !== "0") {
-          this.set("git: push…");
-          await this.run(["push"]);
-        }
-      }
-      this.set("git: ok " + time());
-    });
+    }
   }
 
-  /**
-   * On devient responsable git après avoir été simple invité : le disque reflète déjà
-   * la session (plus récent que tout), on aligne juste l'historique sur le distant sans
-   * toucher aux fichiers, puis on commit la différence.
-   */
-  adopt() {
-    return this.exclusive(async () => {
-      this.set("git: reprise…");
-      await this.run(["fetch"]);
-      await this.run(["reset", "--mixed", "@{u}"]);
-      this.set("git: ok");
-    }).then(() => this.sync());
-    // (si fetch/reset échoue, l'erreur est notifiée et sync() refait un pull --rebase classique)
+  protected async doAdopt() {
+    await this.run(["fetch"]);
+    await this.run(["reset", "--mixed", "@{u}"]);
   }
 }
 
-const pad = (n: number) => String(n).padStart(2, "0");
-const time = (d = new Date()) => `${pad(d.getHours())}:${pad(d.getMinutes())}`;
-const date = (d = new Date()) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${time(d)}`;
+export const pad = (n: number) => String(n).padStart(2, "0");
+export const time = (d = new Date()) => `${pad(d.getHours())}:${pad(d.getMinutes())}`;
+export const date = (d = new Date()) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${time(d)}`;

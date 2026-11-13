@@ -3,7 +3,7 @@
 set -e
 ROOT=$(cd "$(dirname "$0")/../.." && pwd); E=$ROOT/.build/e2e
 rm -rf $E; mkdir -p $E && cd $E
-git init -q --bare remote.git
+git init -q --bare remote.git && git -C remote.git config http.receivepack true
 git clone -q remote.git seed 2>/dev/null; cd seed; git config user.email t@t; git config user.name seed
 mkdir -p dossier .obsidian/plugins/collab-vault .collab
 printf '# Note A\n\nBonjour.\n' > a.md; printf 'note B\n' > dossier/b.md

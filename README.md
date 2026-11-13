@@ -25,10 +25,14 @@ Plugin Obsidian pour écrire à plusieurs dans un même coffre, en temps réel (
   Être connecté dans GitHub Desktop ne suffit pas : le plugin utilise la commande `git` de l'ordinateur.
 
 ### Android / iPhone
-Le téléphone participe aux sessions mais ne fait pas de git : ce sont les ordinateurs connectés qui sauvegardent.
 1. Dans Obsidian mobile, crée un coffre vide.
 2. Installe le plugin **BRAT** depuis les plugins communautaires, puis ajoute le plugin beta `TheoYOSHIURA/obsidian-collab-vault`. Si le dépôt est privé, il faut aussi un jeton GitHub dans les réglages de BRAT.
 3. Ouvre le lien d'invitation (`obsidian://collab-vault?...`) : les notes arrivent depuis la session. Il faut qu'un membre soit connecté.
+4. **Optionnel, sauvegarde git sur le téléphone :** réglages du plugin → « Ouvrir l'assistant ». Indique l'adresse du dépôt (déjà remplie si elle figure dans l'invitation), un **jeton GitHub**, ton nom et ton e-mail.
+   - Le jeton : github.com → Settings → Developer settings → Personal access tokens → **Fine-grained tokens** → Generate new token. Dans « Repository access », choisis *Only select repositories* → le dépôt du coffre. Dans « Permissions », mets **Contents : Read and write**.
+   - Le plugin branche le coffre sur le dépôt **sans écraser les notes présentes** et récupère les fichiers manquants. Sur un coffre vide, c'est un simple clone.
+   - Le téléphone ne commit et ne pousse que **quand il est seul**. Dès qu'un ordinateur avec git est dans la session, c'est l'ordinateur qui sauvegarde.
+   - Le git du téléphone est écrit en JavaScript (isomorphic-git), parce que le programme `git` ne tourne pas sur téléphone. Le jeton reste dans les réglages du plugin, sur le téléphone, et n'est jamais versionné.
 
 ### Modifications hors ligne
 Chaque appareil garde la dernière version partagée des notes, hors git, dans `base-*.json`. Quand il rejoint une session après avoir modifié hors ligne (téléphone dans le métro, PC resté seul), il fait une fusion à trois, comme git :
@@ -53,7 +57,7 @@ Chaque appareil garde la dernière version partagée des notes, hors git, dans `
 - Il faut qu'un membre avec git soit présent pour que le travail de la session soit sauvegardé.
 - Derrière certains réseaux très fermés (NAT symétrique, réseau d'école…), la connexion WebRTC directe peut échouer. Il faudrait alors un serveur TURN.
 - Les relais Nostr publics sont gratuits mais pas garantis.
-- Sur téléphone : pas de sauvegarde git, la collaboration seulement. Non testé sur un vrai Android : les tests simulent le mode téléphone dans Obsidian sur ordinateur.
+- Sur téléphone : non testé sur un vrai Android. Les tests simulent le mode téléphone dans Obsidian sur ordinateur et utilisent un serveur git HTTP local à jeton, pas GitHub.
 - L'installation automatique de git (`winget`) et la fenêtre de connexion GitHub sont propres à Windows et n'ont pas été testées sur un vrai Windows.
 
 ## Développement
@@ -61,8 +65,8 @@ Chaque appareil garde la dernière version partagée des notes, hors git, dans `
 ```sh
 npm install
 npm run build   # → main.js (à copier avec manifest.json et styles.css dans .obsidian/plugins/collab-vault/)
-npm test        # tests du cœur de synchro (réseau et disques simulés)
+npm test        # cœur de synchro, modifs hors ligne, git du téléphone (contre un serveur git HTTP local)
 tools/e2e/scenario.sh   # test de bout en bout dans un vrai Obsidian (profil isolé, 3 coffres)
 ```
 
-`tools/e2e/scenario.sh` lance l'AppImage Obsidian avec un profil séparé et pilote 3 fenêtres (43 vérifications) via le port de débogage 9333.
+`tools/e2e/scenario.sh` lance l'AppImage Obsidian avec un profil séparé et pilote 3 fenêtres (53 vérifications) via le port de débogage 9333.
