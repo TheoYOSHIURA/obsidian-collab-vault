@@ -1,0 +1,31 @@
+# Publie une release à chaque tag de version (ex. 0.4.6) : main.js, manifest.json et styles.css.
+# BRAT installe et met à jour le plugin depuis ces releases (page d'invitation, téléphones).
+name: Release
+
+on:
+  push:
+    tags: ["*.*.*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Le tag doit correspondre à la version du manifest
+        run: |
+          v=$(node -p "require('./manifest.json').version")
+          [ "$v" = "$GITHUB_REF_NAME" ] || { echo "manifest.json est en $v, le tag est $GITHUB_REF_NAME"; exit 1; }
+      - run: npm run build
+      - run: npm test
+      - name: Créer la release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" main.js manifest.json styles.css --title "$GITHUB_REF_NAME" --generate-notes

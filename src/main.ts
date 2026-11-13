@@ -23,6 +23,8 @@ import { BaseStore, Disk, isText, Session } from "./session";
 import { FileOp, TrysteroTransport } from "./transport";
 
 const ROOM_FILE = ".collab/room.json";
+/** Page d'invitation (GitHub Pages du dépôt, dossier docs/) : installe le plugin puis rejoint le coffre. */
+const INVITE_PAGE = "https://theoyoshiura.github.io/obsidian-collab-vault/invite.html";
 const MAX_BINARY = 50 * 1024 * 1024;
 const COLORS = ["#e5484d", "#f76b15", "#ffc53d", "#46a758", "#12a594", "#0090ff", "#6e56cf", "#d6409f"];
 
@@ -927,17 +929,22 @@ class InviteModal extends Modal {
 
     contentEl.createEl("h4", { text: "Ami·e sans accès git" });
     contentEl.createEl("p", {
-      text: "Il installe le plugin dans un coffre vide, puis clique sur ce lien : les notes arrivent depuis la session (il ne fait pas de sauvegarde git, c'est toi qui t'en charges).",
+      text: "Envoie-lui ce lien : la page qui s'ouvre installe le plugin (avec BRAT, qui le garde à jour) puis rejoint le coffre. Les notes arrivent depuis la session ; il ne fait pas de sauvegarde git, c'est toi qui t'en charges.",
     });
+    // L'invitation va dans le fragment (#…) : il n'est jamais envoyé au serveur de la page.
+    const page = INVITE_PAGE + "#" + link.slice(link.indexOf("?") + 1);
+    const copy = (text: string) => async () => {
+      await navigator.clipboard.writeText(text);
+      new Notice("Lien copié !");
+    };
     new Setting(contentEl)
       .setName("Lien d'invitation")
-      .setDesc("Ce lien donne accès au coffre : ne l'envoie qu'à des gens de confiance.")
-      .addButton(b =>
-        b.setButtonText("Copier").onClick(async () => {
-          await navigator.clipboard.writeText(link);
-          new Notice("Lien copié !");
-        }),
-      );
+      .setDesc("Installe le plugin puis rejoint le coffre. Ce lien donne accès au coffre : ne l'envoie qu'à des gens de confiance.")
+      .addButton(b => b.setButtonText("Copier").setCta().onClick(copy(page)));
+    new Setting(contentEl)
+      .setName("Lien direct (plugin déjà installé)")
+      .setDesc("Le lien obsidian:// seul. Certaines messageries ne le rendent pas cliquable.")
+      .addButton(b => b.setButtonText("Copier").onClick(copy(link)));
   }
   onClose() {
     this.contentEl.empty();

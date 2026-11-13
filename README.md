@@ -48,7 +48,7 @@ Chaque appareil garde la dernière version partagée des notes, hors git, dans `
 - **Activer** : palette de commandes → « Collab Vault : Activer la collaboration dans ce coffre ». Ça crée `.collab/room.json`, qui contient l'identifiant de la session et son secret.
 - **Inviter** : « Collab Vault : Inviter quelqu'un ».
   - **Ami avec accès au dépôt git** : ajoute-le comme collaborateur GitHub. Il clone le dépôt, ouvre le dossier dans Obsidian et active les plugins communautaires. Le plugin et l'invitation sont déjà dedans.
-  - **Ami sans git** : il copie le plugin dans un coffre vide, puis clique sur le lien `obsidian://collab-vault?...`.
+  - **Ami sans git** : envoie-lui le lien d'invitation. Il ouvre une page ([docs/invite.html](docs/invite.html), sur GitHub Pages) qui le guide : coffre vide, plugins communautaires, puis des boutons pour installer BRAT, installer Collab Vault (BRAT le garde à jour) et rejoindre le coffre. L'invitation est dans la partie `#…` du lien, que le navigateur n'envoie jamais au serveur. Le lien direct `obsidian://collab-vault?...` reste disponible si le plugin est déjà installé.
 - **Voir qui est là** : clique sur la barre d'état, ou utilise l'icône 👥 du ruban. Tu y vois aussi qui est sur quelle note.
 - **État de la sauvegarde git** : l'icône « branche » du ruban, ou la commande « Afficher l'état de la sauvegarde git ». Le panneau montre l'état (à jour, en attente avec compte à rebours, erreur), qui sauvegarde, les fichiers pas encore sur GitHub et l'historique (clic sur un commit → fichiers modifiés, lien GitHub).
 - **Retirer quelqu'un** : bouton 👤✕ dans « Qui est là ? », ou la commande « Changer la clé du coffre » s'il n'est pas connecté. La clé de la session change et est envoyée à tout le monde sauf lui ; les membres avec git la reçoivent par le dépôt.
@@ -73,5 +73,9 @@ npm test        # cœur de synchro, modifs hors ligne, git du téléphone (contr
 tools/e2e/scenario.sh       # test de bout en bout dans un vrai Obsidian (profil isolé, 3 coffres)
 tools/e2e/agent-writes.sh   # écritures d'un agent (ex. Claude via Agent Client) sur des notes ouvertes
 ```
+
+**Publier une version** : mets à jour `version` dans `manifest.json` et `package.json`, commit, puis pousse un tag du même nom (`git tag 0.4.6 && git push origin 0.4.6`). L'action GitHub « Release » compile, lance les tests et publie `main.js`, `manifest.json` et `styles.css` : BRAT propose alors la mise à jour.
+
+**Page d'invitation** : servie par GitHub Pages depuis le dossier `docs/` de `master` (Settings → Pages → Deploy from a branch → `master` / `/docs`).
 
 `tools/e2e/scenario.sh` lance l'AppImage Obsidian avec un profil séparé et pilote 3 fenêtres (53 vérifications) via le port de débogage 9333.

@@ -1,0 +1,119 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>Invitation Collab Vault</title>
+<style>
+  :root {
+    --bg: #f6f6f8; --card: #ffffff; --text: #1d1d22; --muted: #62626e; --line: #e2e2e8;
+    --accent: #7c5cff; --accent-text: #ffffff; --ok: #2f9e5b;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #17171c; --card: #212128; --text: #ececf1; --muted: #a0a0ad; --line: #33333d;
+      --accent: #9b82ff; --accent-text: #15121f; --ok: #4cc27c; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+    font: 16px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  main { max-width: 560px; margin: 0 auto; padding: 32px 16px 48px; }
+  h1 { font-size: 1.5rem; margin: 0 0 4px; }
+  .lead { color: var(--muted); margin: 0 0 24px; }
+  ol { list-style: none; padding: 0; margin: 0; counter-reset: step; }
+  li { counter-increment: step; background: var(--card); border: 1px solid var(--line);
+    border-radius: 12px; padding: 16px 16px 16px 56px; margin-bottom: 12px; position: relative; }
+  li::before { content: counter(step); position: absolute; left: 16px; top: 16px; width: 26px; height: 26px;
+    border-radius: 50%; background: var(--accent); color: var(--accent-text); font-weight: 600;
+    display: grid; place-items: center; font-size: .9rem; }
+  li h2 { font-size: 1rem; margin: 2px 0 4px; }
+  li p { margin: 0 0 10px; color: var(--muted); }
+  li p:last-child { margin-bottom: 0; }
+  .btn { display: inline-block; background: var(--accent); color: var(--accent-text); text-decoration: none;
+    font-weight: 600; padding: 9px 16px; border-radius: 8px; border: 0; font-size: .95rem; cursor: pointer; }
+  .btn.secondary { background: transparent; color: var(--accent); border: 1px solid var(--accent); }
+  .row { display: flex; flex-wrap: wrap; gap: 8px; }
+  code { background: var(--line); padding: 1px 5px; border-radius: 4px; font-size: .9em; }
+  .note { font-size: .9rem; color: var(--muted); margin-top: 24px; }
+  .error { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 16px; }
+  a { color: var(--accent); }
+</style>
+</head>
+<body>
+<main>
+  <div id="invalid" class="error" hidden>
+    <h1>Lien d'invitation incomplet</h1>
+    <p>Demande à la personne qui t'invite de te renvoyer le lien en entier (commande « Collab Vault : Inviter quelqu'un » dans Obsidian).</p>
+  </div>
+
+  <div id="invite" hidden>
+    <h1>Rejoindre « <span id="vault-name">coffre partagé</span> »</h1>
+    <p class="lead">Tu es invité·e à écrire à plusieurs dans ce coffre Obsidian, en direct. Suis ces étapes dans l'ordre.</p>
+
+    <ol>
+      <li>
+        <h2>Ouvre un coffre vide dans Obsidian</h2>
+        <p>Pas encore Obsidian ? <a href="https://obsidian.md/download" target="_blank" rel="noopener">Télécharge-le</a>.
+          Puis « Créer un nouveau coffre », et laisse-le ouvert. Évite un coffre qui a déjà des notes :
+          les notes partagées remplaceraient celles qui ont le même nom.</p>
+      </li>
+      <li>
+        <h2>Active les plugins communautaires</h2>
+        <p>Dans Obsidian : <b>Paramètres → Plugins communautaires → Activer</b>.</p>
+      </li>
+      <li>
+        <h2>Installe BRAT</h2>
+        <p>BRAT installe le plugin de collaboration et le garde à jour. Dans la page qui s'ouvre, clique sur <b>Installer</b> puis <b>Activer</b>.</p>
+        <a class="btn" href="obsidian://show-plugin?id=obsidian42-brat">Installer BRAT</a>
+      </li>
+      <li>
+        <h2>Installe Collab Vault</h2>
+        <p>BRAT demande confirmation, puis installe et active le plugin.</p>
+        <a class="btn" href="obsidian://brat?plugin=TheoYOSHIURA/obsidian-collab-vault">Installer Collab Vault</a>
+      </li>
+      <li>
+        <h2>Rejoins le coffre</h2>
+        <p>Obsidian demande « Rejoindre ? » : confirme. Les notes arrivent depuis la session ;
+          il faut qu'un membre ait Obsidian ouvert à ce moment-là.</p>
+        <div class="row">
+          <a class="btn" id="join" href="#">Rejoindre le coffre</a>
+          <button class="btn secondary" id="copy" type="button">Copier le lien Obsidian</button>
+        </div>
+      </li>
+    </ol>
+
+    <p class="note">Déjà le plugin ? Passe directement à l'étape 5. Ce lien donne accès aux notes : ne le transmets pas.
+      Les informations de l'invitation restent dans ton navigateur et ne sont envoyées à aucun serveur.</p>
+  </div>
+</main>
+<script>
+  // L'invitation est dans le fragment (#…) : il n'est jamais envoyé au serveur qui héberge cette page.
+  const params = new URLSearchParams(location.hash.slice(1));
+  const room = params.get("room");
+  const secret = params.get("secret");
+  if (!room || !secret) {
+    document.getElementById("invalid").hidden = false;
+  } else {
+    const name = params.get("name") || "coffre partagé";
+    const repo = params.get("repo");
+    document.getElementById("vault-name").textContent = name;
+    document.title = `Rejoindre « ${name} »`;
+    const link = "obsidian://collab-vault?room=" + encodeURIComponent(room) +
+      "&secret=" + encodeURIComponent(secret) +
+      "&name=" + encodeURIComponent(name) +
+      (repo ? "&repo=" + encodeURIComponent(repo) : "");
+    document.getElementById("join").href = link;
+    const copy = document.getElementById("copy");
+    copy.addEventListener("click", async () => {
+      try {
+        await navigator.clipboard.writeText(link);
+        copy.textContent = "Lien copié";
+      } catch {
+        prompt("Copie ce lien :", link);
+      }
+    });
+    document.getElementById("invite").hidden = false;
+  }
+</script>
+</body>
+</html>
