@@ -23,6 +23,10 @@ Plugin Obsidian pour écrire à plusieurs dans un même coffre, en temps réel (
   - vérifie l'accès au dépôt.
   Il s'ouvre aussi tout seul, via une notification, si git manque ou si GitHub refuse la connexion.
   Être connecté dans GitHub Desktop ne suffit pas : le plugin utilise la commande `git` de l'ordinateur.
+- **Nouveau coffre (pas encore sur GitHub)** : au premier lancement, le plugin propose une fois de configurer la sauvegarde. L'assistant :
+  - crée le dépôt git du coffre (branche `main`, `.gitattributes`, `.gitignore` des fichiers propres à chaque machine) ;
+  - sauvegarde aussitôt en local, même sans GitHub ;
+  - propose **Créer sur GitHub** (ouvre la page de création d'un dépôt privé déjà nommé) puis **Relier** avec l'adresse du dépôt. Si le dépôt est vide, la sauvegarde suivante y envoie les notes. S'il contient déjà des notes, elles sont fusionnées avec celles du coffre. En cas de conflit, rien n'est fusionné et la liaison est annulée.
 
 ### Android / iPhone
 1. Dans Obsidian mobile, crée un coffre vide.
