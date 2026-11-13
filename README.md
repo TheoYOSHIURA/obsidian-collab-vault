@@ -66,7 +66,8 @@ Chaque appareil garde la dernière version partagée des notes, hors git, dans `
 npm install
 npm run build   # → main.js (à copier avec manifest.json et styles.css dans .obsidian/plugins/collab-vault/)
 npm test        # cœur de synchro, modifs hors ligne, git du téléphone (contre un serveur git HTTP local)
-tools/e2e/scenario.sh   # test de bout en bout dans un vrai Obsidian (profil isolé, 3 coffres)
+tools/e2e/scenario.sh       # test de bout en bout dans un vrai Obsidian (profil isolé, 3 coffres)
+tools/e2e/agent-writes.sh   # écritures d'un agent (ex. Claude via Agent Client) sur des notes ouvertes
 ```
 
 `tools/e2e/scenario.sh` lance l'AppImage Obsidian avec un profil séparé et pilote 3 fenêtres (53 vérifications) via le port de débogage 9333.

@@ -103,6 +103,49 @@ async function main() {
   check("les sessions parallèles fusionnent en une seule", origins.size === 1, Array.from(origins));
   check("pas de texte dupliqué après fusion", hub2Disk2.files.get("x.md") === undefined || !hub2Disk2.files.get("x.md")!.includes("XX"));
 
+  // Note ouverte dans un éditeur (« liée ») : écritures extérieures vs sauvegardes d'Obsidian
+  {
+    const h4 = new Hub();
+    const mk = (id: string, disk: MemDisk) => {
+      const t = new FakeTransport(h4, id);
+      const sess = new Session(t, disk, { name: id, color: "#000", git: true, joinTimeoutMs: 50, boundDelayMs: 20 }, {
+        isBound: p => p === "n.md", onStructure: () => {}, onPeers: () => {}, log: () => {},
+      });
+      disk.session = sess;
+      h4.connect(t);
+      sess.start();
+      return sess;
+    };
+    const d1 = new MemDisk({ "n.md": "début\n" });
+    const d2 = new MemDisk({});
+    const P1 = mk("p1", d1);
+    await sleep(150);
+    const P2 = mk("p2", d2);
+    await sleep(200);
+    // P1 tape dans son éditeur (le doc suit), puis Obsidian sauvegarde cette version…
+    P1.getText("n.md")!.insert(P1.getText("n.md")!.length, "tapé par p1\n");
+    const saved = P1.getText("n.md")!.toString();
+    // … pendant que P2 continue de taper
+    await sleep(30);
+    P2.getText("n.md")!.insert(P2.getText("n.md")!.length, "tapé par p2 juste après\n");
+    await sleep(60);
+    d1.edit("n.md", saved); // sauvegarde en retard d'Obsidian chez P1
+    await sleep(100);
+    check("note ouverte : une sauvegarde en retard n'efface pas ce que l'autre vient de taper", P1.getText("n.md")!.toString().includes("p2 juste après"));
+    // Un agent (Claude) écrit directement sur le disque de P1, note ouverte
+    d1.edit("n.md", P1.getText("n.md")!.toString() + "écrit par l'agent\n");
+    await sleep(100);
+    check("note ouverte : l'écriture d'un agent arrive dans le doc (et chez l'autre)", P2.getText("n.md")!.toString().includes("écrit par l'agent"));
+    // On tape (pas encore sauvegardé), puis l'agent écrit à partir de la version du disque
+    const onDisk = d1.files.get("n.md")!;
+    P1.getText("n.md")!.insert(0, "TAPÉ ");
+    d1.edit("n.md", onDisk + "ligne de l'agent\n");
+    await sleep(100);
+    const t = P1.getText("n.md")!.toString();
+    check("note ouverte : frappe non sauvegardée + écriture d'agent = les deux gardées", t.startsWith("TAPÉ ") && t.includes("ligne de l'agent"), t);
+    await Promise.all([P1.stop(), P2.stop()]);
+  }
+
   // Un téléphone avec git arrivé en premier ne sauvegarde pas si un ordinateur avec git est là
   {
     const h3 = new Hub();

@@ -78,6 +78,8 @@ export interface SessionOptions {
   writeDelayMs?: number;
   base?: BaseStore;
   baseSaveDelayMs?: number;
+  /** Note ouverte : délai laissé à Obsidian pour fusionner lui-même une écriture extérieure. */
+  boundDelayMs?: number;
 }
 
 export interface Member {
@@ -103,11 +105,15 @@ export class Session {
   private seeding = false;
   private joinTimer: ReturnType<typeof setTimeout> | null = null;
   private lastWritten = new Map<string, string>();
+  /** Dernier contenu connu du disque pour chaque note : base de fusion quand quelqu'un d'autre l'écrit. */
+  private lastDisk = new Map<string, string>();
   private writeTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private dirtyDuringConnect = new Set<string>();
   private queue: Promise<unknown> = Promise.resolve();
   private stopped = false;
   private baseTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Versions récentes de chaque note dans le doc : pour reconnaître les sauvegardes d'Obsidian. */
+  private recent = new Map<string, { text: string; at: number }[]>();
 
   constructor(
     readonly transport: Transport,
@@ -368,6 +374,7 @@ export class Session {
         paths.forEach((p, i) => {
           const c = contents[i];
           if (c != null && !this.files.has(p)) this.files.set(p, new Y.Text(c));
+          if (c != null) this.lastDisk.set(p, c);
         });
       }, DISK);
       this.origin = this.selfId;
@@ -396,6 +403,7 @@ export class Session {
       const D = ytext?.toString();
       const L = await this.readDisk(path);
       const B = base?.[path];
+      if (L != null) this.lastDisk.set(path, L);
       if (L === D || (L == null && D === undefined)) continue;
 
       if (D === undefined) {
@@ -461,6 +469,7 @@ export class Session {
 
   private async writeDisk(path: string, content: string) {
     this.lastWritten.set(path, content);
+    this.lastDisk.set(path, content);
     await this.disk.write(path, content);
   }
 
@@ -479,7 +488,29 @@ export class Session {
     return this.queue;
   }
 
+  private remember(path: string) {
+    const t = this.files.get(path);
+    if (!t) return;
+    const now = Date.now();
+    const list = (this.recent.get(path) ?? []).filter(e => now - e.at < 60_000).slice(-80);
+    list.push({ text: t.toString(), at: now });
+    this.recent.set(path, list);
+  }
+
+  /** Ce contenu a-t-il existé dans le doc récemment ? (= écho d'une sauvegarde, pas une écriture extérieure) */
+  private wasRecent(path: string, content: string) {
+    return this.lastWritten.get(path) === content || !!this.recent.get(path)?.some(e => e.text === content);
+  }
+
   private onDocChange(events: Y.YEvent<any>[], tr: Y.Transaction) {
+    // On note chaque état des notes modifiées, quelle que soit l'origine (éditeur, disque, autres).
+    const touched = new Set<string>();
+    for (const ev of events) {
+      if (ev.target === this.files) ev.changes.keys.forEach((c, key) => c.action !== "delete" && touched.add(key));
+      else if (typeof ev.path[0] === "string") touched.add(ev.path[0]);
+    }
+    for (const p of touched) this.remember(p);
+
     if (tr.origin !== REMOTE || !this.seeded) {
       if (tr.origin === DISK && events.some(e => e.target === this.files)) this.hooks.onStructure();
       return;
@@ -519,6 +550,7 @@ export class Session {
         }
       }
       this.lastWritten.set(path, content);
+      this.lastDisk.set(path, content);
       if (renamedFrom) {
         left.delete(renamedFrom);
         await this.disk.rename(renamedFrom, path);
@@ -544,6 +576,7 @@ export class Session {
           if (!ytext || this.hooks.isBound(path)) return;
           const content = ytext.toString();
           this.lastWritten.set(path, content);
+          this.lastDisk.set(path, content);
           await this.disk.write(path, content);
         });
       }, this.opts.writeDelayMs ?? 150),
@@ -552,22 +585,41 @@ export class Session {
 
   // ---------------------------------------------------------------- disque -> doc
 
-  /** Un fichier texte a été créé ou modifié sur le disque (hors éditeur lié). */
+  /**
+   * Un fichier texte a été créé ou modifié sur le disque.
+   * Même si la note est ouverte : Obsidian ne recharge pas toujours l'éditeur (mode lecture…),
+   * et ignorer l'écriture laisserait une vieille version qu'une sauvegarde réécrirait ensuite.
+   * Les sauvegardes d'Obsidian elles-mêmes sont reconnues (contenu déjà vu dans le doc) et ignorées,
+   * sinon une sauvegarde en retard effacerait ce que les autres viennent de taper.
+   */
   async diskChanged(path: string) {
     if (!isText(path) || this.stopped) return;
     if (!this.seeded) {
       this.dirtyDuringConnect.add(path);
       return;
     }
-    if (this.hooks.isBound(path)) return;
+    // Note ouverte en mode édition : Obsidian fusionne lui-même l'écriture dans l'éditeur (et donc
+    // dans le doc). On le laisse passer d'abord : notre fusion verra alors la même modif des deux
+    // côtés et ne la doublera pas. En mode lecture, Obsidian ne fait rien : c'est nous qui l'appliquons.
+    if (this.hooks.isBound(path)) await new Promise(r => setTimeout(r, this.opts.boundDelayMs ?? 800));
     const content = await this.readDisk(path);
     if (content == null || !this.seeded) return;
     const ytext = this.files.get(path);
+    const base = this.lastDisk.get(path);
+    this.lastDisk.set(path, content);
     if (ytext && ytext.toString() === content) return;
-    if (this.lastWritten.get(path) === content) return; // écho d'une de nos propres écritures
+    if (this.wasRecent(path, content)) return; // sauvegarde d'Obsidian ou écho d'une de nos écritures
+    // Écriture extérieure (agent, git, autre programme), faite à partir de l'ancien contenu du disque :
+    // on fusionne avec ce qui a été tapé entre-temps au lieu de l'écraser.
+    let next = content;
+    if (ytext && base !== undefined) {
+      const m = merge3(ytext.toString(), base, content);
+      if (m.clean) next = m.text;
+      else this.hooks.log(`conflit sur ${path} : la version écrite sur le disque l'emporte`);
+    }
     this.doc.transact(() => {
-      if (ytext) applyDiff(ytext, content);
-      else this.files.set(path, new Y.Text(content));
+      if (ytext) applyDiff(ytext, next);
+      else this.files.set(path, new Y.Text(next));
     }, DISK);
   }
 
