@@ -1,6 +1,6 @@
 {
   "name": "obsidian-collab-vault",
-  "version": "0.4.4",
+  "version": "0.4.5",
   "description": "Plugin Obsidian : édition collaborative P2P + sauvegarde git",
   "scripts": {
     "build": "tsc && node esbuild.config.mjs",

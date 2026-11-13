@@ -92,7 +92,21 @@ async function main() {
   check(!(await backup(a + "/sous-dossier").g.isRepo()), "sous-dossier d'un dépôt pas pris pour un dépôt");
   check(!(await backup(vault("sans-git", {})).g.isRepo()), "dossier sans git pas pris pour un dépôt");
 
-  // 6. adresse invalide
+  // 6. copie dont la branche n'est pas reliée à origin/main, en retard sur GitHub
+  const d = vault("d", {});
+  git(d, "clone", "-q", url, ".");
+  git(d, "config", "user.name", "Test");
+  git(d, "config", "user.email", "test@example.com");
+  git(d, "branch", "--unset-upstream");
+  git(d, "reset", "-q", "--hard", "HEAD~1"); // en retard d'un commit
+  fs.writeFileSync(d + "/Nouvelle.md", "nouvelle\n");
+  const D = backup(d);
+  await D.g.sync(true);
+  check(D.errors.length === 0, "branche non suivie : sauvegarde sans erreur " + D.errors.join(" | "));
+  check(git(d, "rev-parse", "--abbrev-ref", "@{u}") === "origin/main", "branche reliée à origin/main");
+  check(git(bare, "rev-parse", "main") === git(d, "rev-parse", "HEAD"), "commit envoyé après récupération des nouveautés");
+
+  // 7. adresse invalide
   check(!(await C.setup.connectRemote("pas une adresse")).ok, "adresse invalide refusée");
 
   fs.rmSync(root, { recursive: true, force: true });

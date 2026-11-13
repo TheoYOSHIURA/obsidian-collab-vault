@@ -344,11 +344,20 @@ export class Git extends GitBase {
     if (!s.push) return;
     // Pas encore relié à GitHub : on garde les commits en local, sans erreur.
     if (!(await this.remoteUrl())) return;
-    // Relié mais jamais poussé (pas de branche suivie) : premier push.
+    // Pas de branche suivie : si GitHub a déjà cette branche, on s'y relie (puis pull/push
+    // normaux) ; sinon c'est le tout premier envoi. Un push -u direct serait refusé si
+    // GitHub a des commits qu'on n'a pas encore.
     if (!(await this.upstream())) {
-      this.set("git: push…");
-      await this.run(["push", "-u", "origin", "HEAD"]);
-      return;
+      const branch = await this.run(["rev-parse", "--abbrev-ref", "HEAD"]);
+      await this.run(["fetch", "--quiet", "origin"]);
+      const remoteHas = await this.run(["rev-parse", "--verify", "--quiet", `refs/remotes/origin/${branch}`]).catch(() => "");
+      if (!remoteHas) {
+        this.set("git: push…");
+        await this.run(["push", "-u", "origin", "HEAD"]);
+        return;
+      }
+      await this.run(["branch", `--set-upstream-to=origin/${branch}`]);
+      alwaysPull = true;
     }
     const ahead = await this.run(["rev-list", "--count", "@{u}..HEAD"]).catch(() => "1");
     if (ahead !== "0" || alwaysPull) {
