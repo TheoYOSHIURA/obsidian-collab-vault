@@ -83,13 +83,21 @@ export class GitSetup {
   constructor(readonly bin: string, readonly cwd: string) {}
 
   /** L'accès au dépôt distant fonctionne-t-il sans rien demander ? */
-  async checkAccess(): Promise<{ ok: boolean; message: string }> {
+  async checkAccess(): Promise<{ ok: boolean; message: string; needsLogin?: boolean }> {
     const r = await run(this.bin, ["ls-remote", "--heads", "origin"], { cwd: this.cwd, quiet: true, timeoutMs: 30000 });
     if (r.ok) return { ok: true, message: "Accès au dépôt OK" };
-    if (/Repository not found|denied|40[13]/i.test(r.err)) {
-      return { ok: false, message: "GitHub refuse l'accès : connecte-toi avec le compte qui a été invité sur le dépôt." };
+    // Aucun identifiant enregistré sur cet ordinateur : git voudrait le demander dans un terminal.
+    if (/could not read (Username|Password)|terminal prompts disabled|cannot prompt|GCM_INTERACTIVE/i.test(r.err)) {
+      return { ok: false, needsLogin: true, message: "Pas encore connecté à GitHub sur cet ordinateur." };
     }
-    return { ok: false, message: r.err.trim().split("\n").pop() || "Connexion impossible" };
+    if (/Repository not found|denied|40[13]/i.test(r.err)) {
+      return {
+        ok: false,
+        needsLogin: true,
+        message: "GitHub refuse l'accès : connecte-toi avec le compte qui a été invité sur le dépôt.",
+      };
+    }
+    return { ok: false, message: lastLine(r.err) };
   }
 
   async remoteHost(): Promise<{ protocol: string; host: string } | null> {
@@ -102,8 +110,10 @@ export class GitSetup {
     return (await run(this.bin, ["remote", "get-url", "origin"], { cwd: this.cwd, quiet: true })).out.trim();
   }
 
+  /** Gestionnaire d'identifiants actif (le dernier non vide : une valeur vide annule les précédentes). */
   async helper(): Promise<string> {
-    return (await run(this.bin, ["config", "--get", "credential.helper"], { cwd: this.cwd, quiet: true })).out.trim();
+    const all = (await run(this.bin, ["config", "--get-all", "credential.helper"], { cwd: this.cwd, quiet: true })).out;
+    return all.replace(/\r?\n$/, "").split(/\r?\n/).pop()?.trim() ?? "";
   }
 
   /**
@@ -127,7 +137,8 @@ export class GitSetup {
     const query = `protocol=${remote.protocol}\nhost=${remote.host}\n\n`;
     const fill = await run(this.bin, ["credential", "fill"], { cwd: this.cwd, input: query, timeoutMs: 5 * 60 * 1000 });
     if (!fill.ok || !/password=/.test(fill.out)) {
-      return { ok: false, message: "Connexion annulée ou refusée." };
+      const why = fill.err.trim() ? ` (${lastLine(fill.err)})` : "";
+      return { ok: false, message: `La connexion n'a pas abouti${why}. Réessaie, ou vérifie qu'une fenêtre GitHub n'est pas restée derrière Obsidian.` };
     }
     // Vérifie que ça marche, puis demande à git de mémoriser l'identifiant.
     const access = await this.checkAccess();
@@ -231,6 +242,10 @@ const lastLine = (s: string) => s.trim().split("\n").pop() || "erreur inconnue";
 /** Fenêtre d'assistant : un état par étape, avec un bouton pour chaque problème. */
 export class GitSetupModal extends Modal {
   private busy = false;
+  /** La connexion automatique a déjà été tentée pendant cette ouverture de l'assistant. */
+  private autoLoginTried = false;
+  /** Raison du dernier échec de connexion, affichée sous l'étape. */
+  private loginResult = "";
 
   constructor(
     app: App,
@@ -386,23 +401,31 @@ export class GitSetupModal extends Modal {
     // 5. accès GitHub
     const accessStep = step(null, "Connexion à GitHub", "Vérification…");
     const access = await setup.checkAccess();
-    accessStep.setName(`${access.ok ? "✅" : "❌"} Connexion à GitHub`).setDesc(access.message);
+    accessStep
+      .setName(`${access.ok ? "✅" : "❌"} Connexion à GitHub`)
+      .setDesc(access.ok || !this.loginResult ? access.message : `${access.message} ${this.loginResult}`);
     if (!access.ok) {
-      accessStep.addButton(b =>
-        b
-          .setButtonText("Se connecter à GitHub")
-          .setCta()
-          .onClick(async () => {
-            if (this.busy) return;
-            this.busy = true;
-            b.setDisabled(true);
-            accessStep.setDesc("Une fenêtre de connexion GitHub va s'ouvrir (parfois derrière Obsidian)…");
-            const r = await setup.login();
-            this.busy = false;
-            new Notice(r.message, 8000);
-            void this.render();
-          }),
-      );
+      let button: import("obsidian").ButtonComponent | null = null;
+      const login = async () => {
+        if (this.busy) return;
+        this.busy = true;
+        button?.setDisabled(true);
+        accessStep.setDesc("La page de connexion GitHub s'ouvre (fenêtre ou navigateur, parfois derrière Obsidian)…");
+        const r = await setup.login();
+        this.busy = false;
+        this.loginResult = r.ok ? "" : r.message;
+        new Notice(r.message, 8000);
+        void this.render();
+      };
+      accessStep.addButton(b => {
+        button = b;
+        b.setButtonText("Se connecter à GitHub").setCta().onClick(() => void login());
+      });
+      // Pas d'identifiant sur cet ordinateur : on ouvre la connexion tout de suite (une fois par ouverture).
+      if (access.needsLogin && !this.autoLoginTried) {
+        this.autoLoginTried = true;
+        void login();
+      }
     }
     accessStep.addButton(b => b.setButtonText("Revérifier").onClick(() => void this.render()));
 
