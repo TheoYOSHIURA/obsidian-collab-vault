@@ -1,7 +1,7 @@
 // Assistant git : trouver / installer git, se connecter à GitHub, régler son identité.
 // Pensé pour des amis sous Windows qui n'ont jamais ouvert un terminal.
 import { App, Modal, Notice, Platform, Setting } from "obsidian";
-import { QUIET_ENV } from "./git";
+import { isAuthError, QUIET_ENV } from "./git";
 
 const node = <T>(m: string): T => require(m);
 const cp = () => node<typeof import("child_process")>("child_process");
@@ -98,6 +98,10 @@ export class GitSetup {
     return m ? { protocol: m[1], host: m[2] } : null;
   }
 
+  async remoteUrl(): Promise<string> {
+    return (await run(this.bin, ["remote", "get-url", "origin"], { cwd: this.cwd, quiet: true })).out.trim();
+  }
+
   async helper(): Promise<string> {
     return (await run(this.bin, ["config", "--get", "credential.helper"], { cwd: this.cwd, quiet: true })).out.trim();
   }
@@ -139,10 +143,90 @@ export class GitSetup {
 
   /** Identité des commits, réglée pour ce coffre seulement. */
   async setIdentity(id: Identity) {
-    await run(this.bin, ["config", "user.name", id.name], { cwd: this.cwd, quiet: true });
-    await run(this.bin, ["config", "user.email", id.email], { cwd: this.cwd, quiet: true });
+    // Pas encore de dépôt : on règle l'identité pour tout l'ordinateur (sinon `git config` échoue).
+    const scope = fs().existsSync(this.cwd + "/.git") ? [] : ["--global"];
+    await run(this.bin, ["config", ...scope, "user.name", id.name], { cwd: this.cwd, quiet: true });
+    await run(this.bin, ["config", ...scope, "user.email", id.email], { cwd: this.cwd, quiet: true });
+  }
+
+  private git(args: string[], timeoutMs = 60000) {
+    return run(this.bin, args, { cwd: this.cwd, quiet: true, timeoutMs });
+  }
+
+  /**
+   * Transforme le coffre en dépôt git (branche main). Le .gitignore et le premier commit
+   * sont faits ensuite par la sauvegarde automatique.
+   */
+  async initRepo(): Promise<{ ok: boolean; message: string }> {
+    let r = await this.git(["init", "-b", "main"]);
+    if (!r.ok) {
+      // git trop ancien pour -b
+      r = await this.git(["init"]);
+      if (r.ok) await this.git(["symbolic-ref", "HEAD", "refs/heads/main"]);
+    }
+    if (!r.ok) return { ok: false, message: "Impossible de créer le dépôt : " + lastLine(r.err) };
+    // Fins de ligne identiques sur Windows, Mac et téléphone : évite des diffs fantômes.
+    const attr = this.cwd + "/.gitattributes";
+    if (!fs().existsSync(attr)) fs().writeFileSync(attr, "* text=auto\n");
+    return { ok: true, message: "Dépôt git créé : tes notes seront enregistrées automatiquement." };
+  }
+
+  /**
+   * Relie le coffre à un dépôt GitHub. Dépôt vide : la prochaine sauvegarde l'envoie.
+   * Dépôt avec des notes : on les récupère et on les fusionne avec celles du coffre.
+   */
+  async connectRemote(url: string): Promise<{ ok: boolean; message: string }> {
+    url = url.trim();
+    if (!/^(https?:\/\/|git@|file:\/\/)\S+$/.test(url)) {
+      return { ok: false, message: "Adresse invalide. Exemple : https://github.com/pseudo/coffre.git" };
+    }
+    const hasOrigin = (await this.git(["remote", "get-url", "origin"])).ok;
+    await this.git(["remote", hasOrigin ? "set-url" : "add", "origin", url]);
+
+    const head = await this.git(["ls-remote", "--symref", "origin", "HEAD"], 30000);
+    if (!head.ok) {
+      return isAuthError(head.err)
+        ? { ok: false, message: "Dépôt relié, mais GitHub refuse l'accès : connecte-toi ci-dessous." }
+        : { ok: false, message: "Dépôt injoignable : " + lastLine(head.err) };
+    }
+    const branch = head.out.match(/^ref: refs\/heads\/(\S+)\s+HEAD/m)?.[1];
+    if (!branch) return { ok: true, message: "Relié à GitHub. Le dépôt est vide : la prochaine sauvegarde y enverra tes notes." };
+
+    // Le dépôt contient déjà des notes : on enregistre celles d'ici, puis on fusionne.
+    await this.git(["add", "-A"]);
+    if ((await this.git(["status", "--porcelain"])).out.trim()) {
+      const c = await this.git(["commit", "-m", "Notes du coffre avant la liaison avec GitHub"]);
+      if (!c.ok) return { ok: false, message: "Commit impossible (nom et e-mail réglés ?) : " + lastLine(c.err || c.out) };
+    }
+    const fetch = await this.git(["fetch", "origin", branch], 5 * 60 * 1000);
+    if (!fetch.ok) {
+      await this.git(["remote", "remove", "origin"]);
+      return { ok: false, message: "Téléchargement impossible : " + lastLine(fetch.err) };
+    }
+    const hasCommits = (await this.git(["rev-parse", "--verify", "HEAD"])).ok;
+    await this.git(["branch", "-M", branch]);
+    if (hasCommits) {
+      const m = await this.git(["merge", `origin/${branch}`, "--allow-unrelated-histories", "--no-edit"], 5 * 60 * 1000);
+      if (!m.ok) {
+        await this.git(["merge", "--abort"]);
+        // On défait la liaison : sinon chaque sauvegarde tenterait un push refusé.
+        await this.git(["remote", "remove", "origin"]);
+        return {
+          ok: false,
+          message:
+            "Les notes de GitHub entrent en conflit avec celles de ce coffre. Tes notes n'ont pas été modifiées : " +
+            "clone plutôt le dépôt dans un nouveau dossier (GitHub Desktop) et ouvre-le dans Obsidian.",
+        };
+      }
+    } else {
+      await this.git(["reset", "--hard", `origin/${branch}`]);
+    }
+    await this.git(["branch", `--set-upstream-to=origin/${branch}`]);
+    return { ok: true, message: "Relié à GitHub : les notes du dépôt ont été récupérées." };
   }
 }
+
+const lastLine = (s: string) => s.trim().split("\n").pop() || "erreur inconnue";
 
 /** Fenêtre d'assistant : un état par étape, avec un bouton pour chaque problème. */
 export class GitSetupModal extends Modal {
@@ -156,8 +240,8 @@ export class GitSetupModal extends Modal {
       gitBin: () => string | null;
       /** Relance la détection de git après une installation ; renvoie le chemin trouvé. */
       redetect: () => Promise<string | null>;
-      /** Appelé quand tout est prêt (pour relancer la sauvegarde / la session). */
-      onReady: () => void;
+      /** Appelé quand tout est prêt (pour relancer la sauvegarde / la session). `force` : sauvegarde tout de suite. */
+      onReady: (force?: boolean) => void;
     },
   ) {
     super(app);
@@ -173,12 +257,6 @@ export class GitSetupModal extends Modal {
     el.empty();
     if (!Platform.isDesktopApp) {
       el.createEl("p", { text: "Sur téléphone, git n'est pas disponible : ce sont les ordinateurs de la session qui sauvegardent." });
-      return;
-    }
-    if (!this.ctx.hasRepo()) {
-      el.createEl("p", {
-        text: "Ce coffre n'est pas un dépôt git. Pour la sauvegarde, clone d'abord le dépôt (par ex. avec GitHub Desktop) puis ouvre ce dossier dans Obsidian.",
-      });
       return;
     }
     const status = el.createDiv({ cls: "cv-setup" });
@@ -240,7 +318,72 @@ export class GitSetupModal extends Modal {
       }),
     );
 
-    // 3. accès GitHub
+    // 3. le coffre est-il un dépôt git ?
+    if (!this.ctx.hasRepo()) {
+      const s = step(
+        false,
+        "Dépôt git du coffre",
+        "Ce coffre n'est pas encore un dépôt git. Si ses notes sont déjà sur GitHub, clone plutôt le dépôt " +
+          "(GitHub Desktop) et ouvre ce dossier dans Obsidian. Sinon, crée le dépôt ici." +
+          (idOk ? "" : " Enregistre d'abord ton nom ci-dessus."),
+      );
+      s.addButton(b =>
+        b
+          .setButtonText("Créer le dépôt")
+          .setCta()
+          .setDisabled(!idOk)
+          .onClick(async () => {
+            if (this.busy) return;
+            this.busy = true;
+            b.setDisabled(true);
+            const r = await setup.initRepo();
+            this.busy = false;
+            new Notice(r.message, 8000);
+            if (r.ok) this.ctx.onReady(true);
+            void this.render();
+          }),
+      );
+      return;
+    }
+    step(true, "Dépôt git du coffre", this.ctx.cwd);
+
+    // 4. relié à GitHub ?
+    if (!(await setup.remoteUrl())) {
+      const s = step(
+        false,
+        "Dépôt GitHub",
+        "Pas encore relié : tes notes sont enregistrées sur cet ordinateur seulement. " +
+          "Crée un dépôt privé vide sur GitHub, puis colle son adresse ici.",
+      );
+      let url = "";
+      s.addText(t => t.setPlaceholder("https://github.com/pseudo/coffre.git").onChange(v => (url = v.trim())));
+      s.addButton(b =>
+        b.setButtonText("Créer sur GitHub").onClick(() => {
+          const name = this.ctx.cwd.split(/[\\/]/).filter(Boolean).pop() ?? "coffre";
+          window.open(`https://github.com/new?name=${encodeURIComponent(name)}&visibility=private`);
+        }),
+      );
+      s.addButton(b =>
+        b
+          .setButtonText("Relier")
+          .setCta()
+          .onClick(async () => {
+            if (this.busy) return;
+            if (!url) return new Notice("Colle l'adresse du dépôt GitHub.");
+            this.busy = true;
+            b.setDisabled(true);
+            s.setDesc("Liaison avec GitHub…");
+            const r = await setup.connectRemote(url);
+            this.busy = false;
+            new Notice(r.message, 10000);
+            if (r.ok) this.ctx.onReady(true);
+            void this.render();
+          }),
+      );
+      return;
+    }
+
+    // 5. accès GitHub
     const accessStep = step(null, "Connexion à GitHub", "Vérification…");
     const access = await setup.checkAccess();
     accessStep.setName(`${access.ok ? "✅" : "❌"} Connexion à GitHub`).setDesc(access.message);

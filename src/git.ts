@@ -210,8 +210,9 @@ export class Git extends GitBase {
     return this.run(["remote", "get-url", "origin"]).catch(() => "");
   }
 
-  protected doFetch() {
-    return this.run(["fetch", "--quiet"]).then(() => {});
+  protected async doFetch() {
+    if (!(await this.remoteUrl())) return;
+    await this.run(["fetch", "--quiet"]);
   }
 
   async info(): Promise<GitInfo> {
@@ -319,8 +320,14 @@ export class Git extends GitBase {
     }
   }
 
-  protected doPull() {
-    return this.pullRebase();
+  /** Branche distante suivie (ex. origin/main), ou "" si aucune. */
+  upstream() {
+    return this.run(["rev-parse", "--abbrev-ref", "@{u}"]).catch(() => "");
+  }
+
+  protected async doPull() {
+    if (!(await this.upstream())) return; // rien à récupérer tant que le coffre n'est pas relié
+    await this.pullRebase();
   }
 
   protected async doSync(alwaysPull: boolean) {
@@ -332,6 +339,14 @@ export class Git extends GitBase {
       await this.run(["commit", "-m", this.commitMessage(status.split("\n").length)]);
     }
     if (!s.push) return;
+    // Pas encore relié à GitHub : on garde les commits en local, sans erreur.
+    if (!(await this.remoteUrl())) return;
+    // Relié mais jamais poussé (pas de branche suivie) : premier push.
+    if (!(await this.upstream())) {
+      this.set("git: push…");
+      await this.run(["push", "-u", "origin", "HEAD"]);
+      return;
+    }
     const ahead = await this.run(["rev-list", "--count", "@{u}..HEAD"]).catch(() => "1");
     if (ahead !== "0" || alwaysPull) {
       if (s.pullBeforePush || alwaysPull) {
@@ -347,6 +362,7 @@ export class Git extends GitBase {
   }
 
   protected async doAdopt() {
+    if (!(await this.upstream())) return;
     await this.run(["fetch"]);
     await this.run(["reset", "--mixed", "@{u}"]);
   }

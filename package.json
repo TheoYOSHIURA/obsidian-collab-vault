@@ -1,11 +1,11 @@
 {
   "name": "obsidian-collab-vault",
-  "version": "0.3.1",
+  "version": "0.4.0",
   "description": "Plugin Obsidian : édition collaborative P2P + sauvegarde git",
   "scripts": {
     "build": "tsc && node esbuild.config.mjs",
     "dev": "node esbuild.config.mjs --watch",
-    "test": "for t in session offline mobilegit; do esbuild test/$t.test.ts --bundle --platform=node --outfile=.build/$t.cjs --log-level=error && node --no-deprecation .build/$t.cjs || exit 1; done"
+    "test": "for t in session offline mobilegit gitsetup; do esbuild test/$t.test.ts --bundle --platform=node --alias:obsidian=./test/obsidian-stub.ts --outfile=.build/$t.cjs --log-level=error && node --no-deprecation .build/$t.cjs || exit 1; done"
   },
   "type": "module",
   "dependencies": {

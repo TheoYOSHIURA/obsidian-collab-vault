@@ -43,6 +43,8 @@ interface Settings {
   githubToken: string;
   authorName: string;
   authorEmail: string;
+  /** L'assistant git a déjà été proposé pour ce coffre (on ne le propose qu'une fois). */
+  gitSetupOffered: boolean;
 }
 
 interface RoomConfig {
@@ -89,6 +91,7 @@ export default class CollabVault extends Plugin {
         githubToken: "",
         authorName: "",
         authorEmail: "",
+        gitSetupOffered: false,
       },
       await this.loadData(),
     );
@@ -247,7 +250,7 @@ export default class CollabVault extends Plugin {
         await this.saveData(this.settings);
         return bin;
       },
-      onReady: () => void this.reloadGit(),
+      onReady: force => void this.reloadGit(force),
     }).open();
   }
 
@@ -306,6 +309,15 @@ export default class CollabVault extends Plugin {
       this.noticeWithButton(
         "Collab Vault : ce coffre est un dépôt git, mais git n'est pas installé sur cet ordinateur. Sans lui, tes modifs ne sont sauvegardées que si quelqu'un d'autre est connecté.",
         "Installer / configurer git",
+        () => this.openGitSetup(),
+      );
+    } else if (bin && !this.git && !this.hasRepoFolder() && !this.settings.gitSetupOffered) {
+      // Coffre neuf : on propose une fois de le sauvegarder avec git.
+      this.settings.gitSetupOffered = true;
+      await this.saveData(this.settings);
+      this.noticeWithButton(
+        "Collab Vault : ce coffre n'est pas encore sauvegardé avec git. L'assistant peut créer le dépôt et le relier à GitHub.",
+        "Configurer la sauvegarde",
         () => this.openGitSetup(),
       );
     } else if (this.git instanceof Git) {
