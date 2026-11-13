@@ -20,6 +20,7 @@ export class TrysteroTransport implements Transport {
   private y;
   private aw;
   private file;
+  private rekey;
 
   private constructor(roomId: string, secret: string, readonly selfId: string, room: ReturnType<typeof joinRoom>) {
     this.room = room;
@@ -27,6 +28,7 @@ export class TrysteroTransport implements Transport {
     this.y = room.makeAction<Uint8Array>("y");
     this.aw = room.makeAction<Uint8Array>("aw");
     this.file = room.makeAction<Uint8Array>("file");
+    this.rekey = room.makeAction<any>("rekey");
   }
 
   static async connect(roomId: string, secret: string) {
@@ -57,6 +59,14 @@ export class TrysteroTransport implements Transport {
   }
   sendFile(op: FileOp, data?: Uint8Array, to?: string) {
     return this.file.send(data ?? new Uint8Array(0), this.opts(to, op)).catch(e => console.warn("[collab-vault] envoi échoué", e));
+  }
+
+  /** Envoie la nouvelle clé du coffre à UN pair (jamais en diffusion : on exclut la personne retirée). */
+  sendRekey(cfg: { room: string; secret: string }, to: string) {
+    return this.rekey.send(cfg, { target: to }).catch(e => console.warn("[collab-vault] envoi clé échoué", e));
+  }
+  onRekey(cb: (cfg: { room: string; secret: string }, from: string) => void) {
+    this.rekey.onMessage((d, ctx) => cb(d as any, ctx.peerId));
   }
 
   onHello(cb: (h: Hello, from: string) => void) {

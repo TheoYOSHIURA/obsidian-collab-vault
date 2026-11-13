@@ -8,11 +8,36 @@ export interface GitSettings {
   pullBeforePush: boolean;
 }
 
+export type ChangeKind = "M" | "A" | "D" | "R" | "?";
+export interface Change {
+  kind: ChangeKind;
+  path: string;
+  from?: string;
+}
+export interface Commit {
+  hash: string;
+  author: string;
+  at: number; // ms
+  subject: string;
+  pushed: boolean;
+}
+export interface GitInfo {
+  branch: string;
+  upstream: string | null;
+  ahead: number;
+  behind: number;
+  /** Différences entre le disque et ce qui est sur le dépôt distant. */
+  changes: Change[];
+  log: Commit[];
+}
+
 export class Git {
   private chain: Promise<void> = Promise.resolve();
   private syncQueued = false;
   private queuedAlwaysPull = false;
   status = "git: ok";
+  lastError: { message: string; at: number } | null = null;
+  lastOk: number | null = null;
 
   constructor(
     readonly cwd: string,
@@ -22,12 +47,22 @@ export class Git {
   ) {}
 
   run(args: string[]): Promise<string> {
+    return this.runRaw(args).then(s => s.trim());
+  }
+
+  /** Sortie brute (sans trim : indispensable pour les formats -z / porcelain). */
+  runRaw(args: string[]): Promise<string> {
     return new Promise((resolve, reject) => {
       execFile("git", args, { cwd: this.cwd, maxBuffer: 50 * 1024 * 1024 }, (err, stdout, stderr) => {
         if (err) reject(new Error((stderr || stdout || err.message).trim()));
-        else resolve(stdout.trim());
+        else resolve(stdout);
       });
     });
+  }
+
+  /** Lecture seule, sans prendre de verrou (ne gêne pas un commit en cours). */
+  private ro(args: string[]) {
+    return this.runRaw(["--no-optional-locks", "-c", "core.quotePath=false", ...args]);
   }
 
   /** Le coffre est-il la racine d'un dépôt ? (pas juste un sous-dossier d'un autre dépôt) */
@@ -47,21 +82,101 @@ export class Git {
 
   private set(s: string) {
     this.status = s;
+    if (s.startsWith("git: ok")) {
+      this.lastOk = Date.now();
+      this.lastError = null;
+    }
     this.onStatus(s);
   }
 
-  /** Les opérations git passent une par une, dans l'ordre. */
-  private exclusive(fn: () => Promise<void>): Promise<void> {
+  /** Les opérations git passent une par une, dans l'ordre. `quiet` : pas de notification d'erreur. */
+  private exclusive(fn: () => Promise<void>, quiet = false): Promise<void> {
     this.chain = this.chain.then(async () => {
       try {
         await fn();
       } catch (e: any) {
+        if (quiet) return console.warn("[collab-vault]", e);
+        this.lastError = { message: e.message, at: Date.now() };
         this.set("git: erreur ⚠");
         this.onError(e.message);
         console.error("[collab-vault]", e);
       }
     });
     return this.chain;
+  }
+
+  /** Met à jour la vue du dépôt distant (sans toucher aux fichiers). */
+  fetch() {
+    return this.exclusive(() => this.run(["fetch", "--quiet"]).then(() => {}), true);
+  }
+
+  async info(): Promise<GitInfo> {
+    const branch = (await this.ro(["rev-parse", "--abbrev-ref", "HEAD"])).trim();
+    const upstream = (await this.ro(["rev-parse", "--abbrev-ref", "@{u}"]).catch(() => "")).trim() || null;
+    let ahead = 0;
+    let behind = 0;
+    const changes: Change[] = [];
+    if (upstream) {
+      const [a, b] = (await this.ro(["rev-list", "--left-right", "--count", "HEAD...@{u}"])).trim().split(/\s+/);
+      ahead = Number(a) || 0;
+      behind = Number(b) || 0;
+      // disque (fichiers suivis) comparé au dépôt distant
+      const parts = (await this.ro(["diff", "-M", "--name-status", "-z", "@{u}", "--"])).split("\0");
+      for (let i = 0; i < parts.length - 1; ) {
+        const code = parts[i++];
+        if (!code) continue;
+        if (code[0] === "R" || code[0] === "C") {
+          const from = parts[i++];
+          changes.push({ kind: "R", from, path: parts[i++] });
+        } else {
+          changes.push({ kind: (code[0] === "A" || code[0] === "D" ? code[0] : "M") as ChangeKind, path: parts[i++] });
+        }
+      }
+    } else {
+      const parts = (await this.ro(["status", "--porcelain", "-z", "--untracked-files=no"])).split("\0");
+      for (let i = 0; i < parts.length; i++) {
+        const p = parts[i];
+        if (p.length < 4) continue;
+        const code = p.slice(0, 2);
+        if (code.includes("R")) {
+          changes.push({ kind: "R", path: p.slice(3), from: parts[++i] });
+        } else {
+          changes.push({ kind: code.includes("D") ? "D" : code.includes("A") ? "A" : "M", path: p.slice(3) });
+        }
+      }
+    }
+    for (const p of (await this.ro(["ls-files", "--others", "--exclude-standard", "-z"])).split("\0")) {
+      if (p) changes.push({ kind: "?", path: p });
+    }
+
+    const refs = upstream ? ["HEAD", "@{u}"] : ["HEAD"];
+    const unpushed = new Set(
+      upstream ? (await this.ro(["rev-list", "HEAD", "^@{u}"])).split("\n").filter(Boolean) : [],
+    );
+    const log = (await this.ro(["log", "-n", "30", "--format=%H%x1f%an%x1f%at%x1f%s%x1e", ...refs]).catch(() => ""))
+      .split("\x1e")
+      .map(l => l.trim())
+      .filter(Boolean)
+      .map(l => {
+        const [hash, author, at, subject] = l.split("\x1f");
+        return { hash, author, at: Number(at) * 1000, subject, pushed: upstream ? !unpushed.has(hash) : false };
+      });
+    return { branch, upstream, ahead, behind, changes, log };
+  }
+
+  /** Fichiers modifiés par un commit. */
+  async commitFiles(hash: string): Promise<Change[]> {
+    const parts = (await this.ro(["show", "-M", "--name-status", "-z", "--format=", hash])).split("\0");
+    const out: Change[] = [];
+    for (let i = 0; i < parts.length - 1; ) {
+      const code = parts[i++].trim();
+      if (!code) continue;
+      if (code[0] === "R" || code[0] === "C") {
+        const from = parts[i++];
+        out.push({ kind: "R", from, path: parts[i++] });
+      } else out.push({ kind: (code[0] === "A" || code[0] === "D" ? code[0] : "M") as ChangeKind, path: parts[i++] });
+    }
+    return out;
   }
 
   private async pullRebase() {

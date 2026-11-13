@@ -13,6 +13,7 @@ import {
 } from "obsidian";
 import { EditorBinder } from "./editor";
 import { Git } from "./git";
+import { GIT_VIEW, GitView } from "./gitview";
 import { Disk, isText, Session } from "./session";
 import { FileOp, TrysteroTransport } from "./transport";
 
@@ -46,6 +47,9 @@ export default class CollabVault extends Plugin {
   binder = new EditorBinder();
   statusBar!: HTMLElement;
   private gitTimer: number | null = null;
+  /** Heure prévue du prochain commit automatique (pour le compte à rebours du panneau). */
+  gitDueAt: number | null = null;
+  private viewTimer: number | null = null;
   private wasFollower = false;
   private wasLeader = false;
   private recentBinary = new Map<string, number>();
@@ -84,11 +88,33 @@ export default class CollabVault extends Plugin {
     this.registerCommands();
     this.registerObsidianProtocolHandler("collab-vault", params => this.handleInviteLink(params));
     this.addRibbonIcon("users", "Collab Vault : qui est là ?", () => new MembersModal(this.app, this).open());
+    this.registerView(GIT_VIEW, leaf => new GitView(leaf, this));
+    this.addRibbonIcon("git-branch", "Collab Vault : état de la sauvegarde git", () => void this.openGitView());
 
     this.app.workspace.onLayoutReady(() => void this.startup());
   }
 
+  async openGitView() {
+    const existing = this.app.workspace.getLeavesOfType(GIT_VIEW)[0];
+    const leaf = existing ?? this.app.workspace.getRightLeaf(false);
+    if (!leaf) return;
+    if (!existing) await leaf.setViewState({ type: GIT_VIEW, active: true });
+    void this.app.workspace.revealLeaf(leaf);
+  }
+
+  /** Rafraîchit le panneau git (regroupé : au plus une fois toutes les 1,5 s). */
+  refreshGitView(now = false) {
+    const views = this.app.workspace.getLeavesOfType(GIT_VIEW).map(l => l.view).filter(v => v instanceof GitView);
+    if (!views.length) return;
+    if (this.viewTimer) window.clearTimeout(this.viewTimer);
+    this.viewTimer = window.setTimeout(() => {
+      this.viewTimer = null;
+      for (const v of views) void v.refresh();
+    }, now ? 0 : 1500);
+  }
+
   onunload() {
+    if (this.viewTimer) window.clearTimeout(this.viewTimer);
     if (this.gitTimer) window.clearTimeout(this.gitTimer);
     this.binder.unbindAll(this.app);
     void this.session?.stop();
@@ -100,7 +126,10 @@ export default class CollabVault extends Plugin {
     const git = new Git(
       this.cwd,
       () => this.settings,
-      () => this.updateStatus(),
+      () => {
+        this.updateStatus();
+        this.refreshGitView(true);
+      },
       msg => new Notice("Collab Vault : erreur git\n" + msg, 10000),
     );
     if (await git.isRepo()) {
@@ -168,6 +197,7 @@ export default class CollabVault extends Plugin {
         },
       );
       transport.onFile((op, data, from) => void this.onRemoteFile(op, data, from));
+      transport.onRekey((cfg, from) => void this.onRemoteRekey(cfg, from));
       transport.onError(e => console.warn("[collab-vault] réseau", e));
       this.transport = transport;
       this.session = session;
@@ -180,6 +210,44 @@ export default class CollabVault extends Plugin {
       this.starting = false;
       this.updateStatus();
     }
+  }
+
+  /**
+   * Change la clé du coffre. Les membres connectés (sauf `exclude`) reçoivent la nouvelle
+   * directement ; les autres la récupèrent par git au prochain démarrage.
+   */
+  async rotateKey(exclude?: string) {
+    const s = this.session;
+    const cfg = { room: randomId(12), secret: randomId(24) };
+    let sent = 0;
+    if (s?.seeded && this.transport) {
+      for (const m of s.members()) {
+        if (m.self || m.id === exclude) continue;
+        await this.transport.sendRekey(cfg, m.id);
+        sent++;
+      }
+    }
+    await this.switchRoom(cfg);
+    new Notice(
+      `Clé du coffre changée (${sent} membre(s) connecté(s) suivent).` +
+        (this.git ? " Les membres avec git la recevront au prochain démarrage." : "") +
+        " Les amis sans git devront recevoir un nouveau lien.",
+      10000,
+    );
+  }
+
+  private async onRemoteRekey(cfg: RoomConfig, from: string) {
+    const s = this.session;
+    if (!cfg?.room || !cfg?.secret || !s?.seeded || s.peers.get(from)?.origin !== s.origin) return;
+    new Notice(`Collab Vault : ${s.peers.get(from)?.name ?? "un membre"} a changé la clé du coffre.`);
+    await this.switchRoom(cfg);
+  }
+
+  private async switchRoom(cfg: RoomConfig) {
+    await this.stopSession();
+    await this.writeRoom(cfg);
+    await this.startSession();
+    this.scheduleGit(); // .collab/ est caché : pas d'évènement du coffre, on prévoit le commit nous-mêmes
   }
 
   async stopSession() {
@@ -213,10 +281,12 @@ export default class CollabVault extends Plugin {
       if (!leader) {
         this.wasFollower = true;
         if (this.gitTimer) window.clearTimeout(this.gitTimer);
+        this.gitDueAt = null;
       }
     }
     this.wasLeader = leader;
     this.updateStatus();
+    this.refreshGitView();
   }
 
   /** L'hôte envoie la liste de ses fichiers non texte aux nouveaux venus (images, PDF…). */
@@ -239,12 +309,16 @@ export default class CollabVault extends Plugin {
   }
 
   scheduleGit() {
+    this.refreshGitView();
     if (!this.git || !this.isGitLeader()) return;
     if (this.gitTimer) window.clearTimeout(this.gitTimer);
+    const delay = Math.max(1, this.settings.delaySeconds) * 1000;
+    this.gitDueAt = Date.now() + delay;
     this.gitTimer = window.setTimeout(() => {
       this.gitTimer = null;
+      this.gitDueAt = null;
       if (this.isGitLeader()) void this.git!.sync();
-    }, Math.max(1, this.settings.delaySeconds) * 1000);
+    }, delay);
     this.updateStatus("git: modifs en attente…");
   }
 
@@ -426,6 +500,21 @@ export default class CollabVault extends Plugin {
     this.addCommand({ id: "invite", name: "Inviter quelqu'un", callback: () => void this.openInvite() });
     this.addCommand({ id: "members", name: "Qui est connecté ?", callback: () => new MembersModal(this.app, this).open() });
     this.addCommand({
+      id: "rotate-key",
+      name: "Changer la clé du coffre (retirer quelqu'un)",
+      callback: async () => {
+        if (!(await this.readRoom())) return new Notice("La collaboration n'est pas activée ici.");
+        new ConfirmModal(
+          this.app,
+          "Changer la clé du coffre ?",
+          "Les personnes connectées et celles qui ont accès au dépôt git recevront la nouvelle clé. Pour retirer quelqu'un, enlève-le d'abord du dépôt GitHub. Les amis sans git devront recevoir un nouveau lien d'invitation.",
+          () => void this.rotateKey(),
+          "Changer la clé",
+        ).open();
+      },
+    });
+    this.addCommand({ id: "git-view", name: "Afficher l'état de la sauvegarde git", callback: () => void this.openGitView() });
+    this.addCommand({
       id: "sync-now",
       name: "Commit & push maintenant",
       callback: () => {
@@ -511,6 +600,22 @@ class MembersModal extends Modal {
             this.close();
             void this.app.workspace.openLinkText(file, "");
           });
+        })
+        .addExtraButton(b => {
+          if (m.self) return b.extraSettingsEl.hide();
+          b.setIcon("user-x").setTooltip(`Retirer ${m.name} du coffre`).onClick(() => {
+            this.close();
+            new ConfirmModal(
+              this.app,
+              `Retirer ${m.name} ?`,
+              `La clé du coffre est changée et envoyée à tout le monde sauf ${m.name}, qui se retrouve seul·e dans l'ancienne session. ` +
+                `Retire-le aussi du dépôt GitHub, sinon il récupérera la nouvelle clé par git. ` +
+                `Il garde la copie des notes qu'il a déjà sur son ordinateur.`,
+              () => void this.plugin.rotateKey(m.id),
+              "Retirer",
+              true,
+            ).open();
+          });
         });
     }
     new Setting(contentEl).addButton(b =>
@@ -565,7 +670,14 @@ class InviteModal extends Modal {
 }
 
 class ConfirmModal extends Modal {
-  constructor(app: App, readonly title: string, readonly text: string, readonly onYes: () => void) {
+  constructor(
+    app: App,
+    readonly title: string,
+    readonly text: string,
+    readonly onYes: () => void,
+    readonly yesLabel = "Rejoindre",
+    readonly danger = false,
+  ) {
     super(app);
   }
   onOpen() {
@@ -574,7 +686,7 @@ class ConfirmModal extends Modal {
     new Setting(this.contentEl)
       .addButton(b => b.setButtonText("Annuler").onClick(() => this.close()))
       .addButton(b =>
-        b.setButtonText("Rejoindre").setCta().onClick(() => {
+        (this.danger ? b.setWarning() : b.setCta()).setButtonText(this.yesLabel).onClick(() => {
           this.close();
           this.onYes();
         }),

@@ -9,8 +9,8 @@ stop_test_obsidian() { for p in $(pgrep -i obsidian); do grep -qa 'e2e/userdata'
 
 # typ <v1|v2> <texte> [debut] : tape le texte lettre par lettre dans l'éditeur actif
 typ() { local js; js=$(node -e 'console.log(JSON.stringify(process.argv[1]))' "$2"); local start=${3:-false}
-  c $1 "const txt=$js; const cm=app.workspace.activeEditor.editor.cm; for (const ch of txt) { const pos = $start ? 0 : cm.state.doc.length; cm.dispatch({changes:{from:pos, insert:ch}, userEvent:'input.type'}); await new Promise(r=>setTimeout(r,15)); } return 1" >/dev/null; }
-has() { [[ "$1" == *"$2"* ]] && echo oui || echo "non ($1)"; }
+  c $1 "const txt=$js; const cm=(app.workspace.activeEditor ?? app.workspace.getLeavesOfType('markdown')[0].view).editor.cm; for (const ch of txt) { const pos = $start ? 0 : cm.state.doc.length; cm.dispatch({changes:{from:pos, insert:ch}, userEvent:'input.type'}); await new Promise(r=>setTimeout(r,15)); } return 1" >/dev/null; }
+has() { [[ "${1,,}" == *"${2,,}"* ]] && echo oui || echo "non ($1)"; }
 
 stop_test_obsidian; ./setup.sh
 ("${OBSIDIAN:-$HOME/AppImages/Obsidian-1.15.1.AppImage}" --user-data-dir=$E/userdata --remote-debugging-port=9333 > $E/obsidian.log 2>&1 &)
@@ -75,4 +75,34 @@ typ v3 $'\nCoucou de v3.' false; sleep 9
 check "l'écriture de v3 est sauvegardée par git" "$(git -C $E/remote.git show HEAD:Accueil.md | tail -1)" "Coucou de v3."
 MEM='app.commands.executeCommandById("collab-vault:members"); await new Promise(r=>setTimeout(r,600)); const c=[...document.querySelectorAll(".modal-container")].at(-1); const t=c.innerText; c.querySelector(".modal-close-button")?.click(); return t'
 check "« qui est là ? » affiche l'hôte" "$(has "$(c v3 "$MEM")" "hôte · sauvegarde git")" "oui"
+
+# panneau « Sauvegarde git »
+GV='app.commands.executeCommandById("collab-vault:git-view"); await new Promise(r=>setTimeout(r,4000)); const v=app.workspace.getLeavesOfType("collab-vault-git")[0]?.view; return v ? v.contentEl.innerText : "(pas de panneau)"'
+OUT2=$(c v2 "$GV"); OUT3=$(c v3 "$GV")
+check "panneau git : responsable voit l'historique" "$(has "$OUT2" "vault: ")$(has "$OUT2" "Historique")" "ouioui"
+check "panneau git : état affiché" "$(has "$OUT2" "Tout est sur GitHub")" "oui"
+check "panneau git : v3 sans git" "$(has "$OUT3" "n'utilise pas git")$(has "$OUT3" "sauvegarde la session")" "ouioui"
+c v2 'app.plugins.plugins["collab-vault"].settings.delaySeconds=30; return 1' >/dev/null
+typ v2 $'\nEn attente.' false; sleep 2
+OUT2=$(c v2 'const v=app.workspace.getLeavesOfType("collab-vault-git")[0].view; await v.refresh(); return v.contentEl.innerText')
+check "panneau git : fichier en attente + compte à rebours" "$(has "$OUT2" "Accueil.md")$(has "$OUT2" "Commit automatique dans")" "ouioui"
+OUT1=$(c v1 'app.commands.executeCommandById("collab-vault:git-view"); await new Promise(r=>setTimeout(r,4000)); return app.workspace.getLeavesOfType("collab-vault-git")[0].view.contentEl.innerText')
+check "panneau git : invité voit qui sauvegarde" "$(has "$OUT1" "v2 sauvegarde la session")" "oui"
+c v2 'const v=app.workspace.getLeavesOfType("collab-vault-git")[0].view; v.contentEl.querySelector(".cv-commit-top").click(); await new Promise(r=>setTimeout(r,800)); return 1' >/dev/null
+check "panneau git : détail d'un commit" "$(has "$(c v2 'return app.workspace.getLeavesOfType("collab-vault-git")[0].view.contentEl.querySelector(".cv-files").innerText')" "Accueil.md")" "oui"
+
+# v2 retire v3 depuis « qui est là ? »
+OLDKEY=$(cat $E/v1/.collab/room.json)
+c v2 'app.commands.executeCommandById("collab-vault:members"); await new Promise(r=>setTimeout(r,600)); const c=[...document.querySelectorAll(".modal-container")].at(-1); const b=c.querySelector("[aria-label=\"Retirer v3 du coffre\"]"); b.click(); await new Promise(r=>setTimeout(r,600)); const c2=[...document.querySelectorAll(".modal-container")].at(-1); [...c2.querySelectorAll("button")].find(x=>x.textContent==="Retirer").click(); return 1' >/dev/null
+for i in $(seq 1 40); do s1=$(c v1 "$STATUS"); [[ "$s1" == *"👥 2"* ]] && break; sleep 1; done; sleep 2
+check "v1 et v2 ont la même nouvelle clé" "$(cat $E/v1/.collab/room.json | md5sum)" "$(cat $E/v2/.collab/room.json | md5sum)"
+check "la clé a changé" "$( [ "$(cat $E/v1/.collab/room.json)" != "$OLDKEY" ] && echo oui)" "oui"
+check "v3 garde l'ancienne clé" "$(cat $E/v3/.collab/room.json | tr -d ' \n')" "$(echo "$OLDKEY" | tr -d ' \n')"
+check "v1 et v2 de nouveau ensemble, sans v3" "$(has "$s1" "👥 2")" "oui"
+check "v3 se retrouve seul" "$(has "$(c v3 "$STATUS")" "seul")" "oui"
+typ v3 $'\nv3 après son retrait.' false; typ v2 $'\nv2 après le retrait.' false; sleep 4
+check "les modifs de v3 n'arrivent plus" "$(grep -c 'v3 après son retrait' $E/v1/Accueil.md)" "0"
+check "v1 et v2 collaborent toujours" "$(grep -c 'v2 après le retrait' $E/v1/Accueil.md)" "1"
+sleep 30
+check "la nouvelle clé est sauvegardée dans git" "$(git -C $E/remote.git show HEAD:.collab/room.json | md5sum)" "$(cat $E/v1/.collab/room.json | md5sum)"
 echo; echo "$ok OK, $ko échec(s)"

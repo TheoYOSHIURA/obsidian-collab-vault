@@ -1,0 +1,32 @@
+/* Panneau « Sauvegarde git » de Collab Vault */
+.cv-git { padding: 8px 10px; font-size: var(--font-ui-small); }
+.cv-git .cv-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px; }
+.cv-git .cv-head h4 { margin: 0; }
+.cv-git .cv-card { background: var(--background-secondary); border-radius: var(--radius-m); padding: 10px; display: flex; flex-direction: column; gap: 4px; }
+.cv-git .cv-state { display: flex; align-items: center; gap: 6px; font-weight: var(--font-semibold); font-size: var(--font-ui-medium); }
+.cv-git .cv-ok { color: var(--color-green); }
+.cv-git .cv-warn { color: var(--color-orange); }
+.cv-git .cv-error { color: var(--text-error); white-space: pre-wrap; word-break: break-word; font-family: var(--font-monospace); font-size: var(--font-ui-smaller); }
+.cv-git .cv-muted { color: var(--text-muted); }
+.cv-git .cv-pad { padding: 2px 4px; }
+.cv-git .cv-icon { display: inline-flex; }
+.cv-git .cv-icon svg { width: 14px; height: 14px; }
+.cv-git .cv-actions { display: flex; gap: 6px; margin-top: 6px; flex-wrap: wrap; }
+.cv-git .cv-section { margin-top: 14px; }
+.cv-git .cv-section-title { display: flex; align-items: center; gap: 6px; font-weight: var(--font-semibold); color: var(--text-muted); margin-bottom: 4px; text-transform: uppercase; font-size: var(--font-ui-smaller); letter-spacing: 0.04em; }
+.cv-git .cv-file { display: flex; align-items: baseline; gap: 6px; padding: 2px 4px; border-radius: var(--radius-s); cursor: pointer; min-width: 0; }
+.cv-git .cv-file:hover, .cv-git .cv-commit-top:hover { background: var(--background-modifier-hover); }
+.cv-git .cv-kind { font-family: var(--font-monospace); font-weight: var(--font-bold); width: 1.1em; flex-shrink: 0; text-align: center; }
+.cv-git .cv-kind-M { color: var(--color-yellow); }
+.cv-git .cv-kind-A, .cv-git .cv-kind-N { color: var(--color-green); }
+.cv-git .cv-kind-D { color: var(--color-red); }
+.cv-git .cv-kind-R { color: var(--color-blue); }
+.cv-git .cv-name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex-shrink: 1; min-width: 0; }
+.cv-git .cv-dir { color: var(--text-faint); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex-shrink: 2; min-width: 0; font-size: var(--font-ui-smaller); }
+.cv-git .cv-commit { padding: 3px 0; border-bottom: 1px solid var(--background-modifier-border); }
+.cv-git .cv-commit-top { display: flex; align-items: center; gap: 4px; cursor: pointer; border-radius: var(--radius-s); padding: 1px 2px; }
+.cv-git .cv-subject { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.cv-git .cv-badge { font-size: var(--font-ui-smaller); background: var(--color-orange); color: var(--text-on-accent); border-radius: var(--radius-s); padding: 0 5px; flex-shrink: 0; }
+.cv-git .cv-meta { padding-left: 20px; font-size: var(--font-ui-smaller); }
+.cv-git .cv-files { padding-left: 16px; }
+.cv-git .cv-link { display: inline-block; padding: 2px 4px; font-size: var(--font-ui-smaller); }
