@@ -11,7 +11,9 @@ const ROOT = path.resolve(".build/mg-test");
 const TOKEN = "jeton-de-test";
 const PORT = 18765;
 const URL = `http://127.0.0.1:${PORT}/remote.git`;
-const sh = (cmd: string, cwd = ROOT) => execSync(cmd, { cwd, stdio: "pipe" }).toString().trim();
+// Commandes au format sh : sous Windows on passe par le bash de Git for Windows (cmd ne connaît ni 2>/dev/null ni ;).
+const shell = process.platform === "win32" ? "bash" : "/bin/sh";
+const sh = (cmd: string, cwd = ROOT) => execSync(cmd, { cwd, stdio: "pipe", shell }).toString().trim();
 
 async function main() {
   fs.rmSync(ROOT, { recursive: true, force: true });
@@ -19,7 +21,7 @@ async function main() {
   sh("git init -q --bare -b main remote.git && git -C remote.git config http.receivepack true");
   sh("git clone -q remote.git pc 2>/dev/null; true");
   const pc = path.join(ROOT, "pc");
-  sh("git config user.email pc@t && git config user.name PC", pc);
+  sh("git config user.email pc@t && git config user.name PC && git config core.autocrlf false", pc);
   fs.writeFileSync(`${pc}/a.md`, "ligne 1\nligne 2\nligne 3\n");
   fs.writeFileSync(`${pc}/b.md`, "note b\n");
   fs.mkdirSync(`${pc}/dossier`);
@@ -105,6 +107,53 @@ async function main() {
     fs.writeFileSync(`${phone}/b.md`, "encore\n");
     await bad.sync(true);
     check("jeton invalide : erreur de connexion détectée", !!bad.lastError?.auth || isAuthError(bad.lastError?.message ?? ""), bad.lastError);
+
+    // Dépôt dont la branche par défaut est master (pas main)
+    sh("git init -q --bare -b master remote-master.git && git -C remote-master.git config http.receivepack true");
+    sh("git clone -q remote-master.git pcm 2>/dev/null; true");
+    const pcm = path.join(ROOT, "pcm");
+    sh("git config user.email pc@t && git config user.name PC && git config core.autocrlf false", pcm);
+    fs.writeFileSync(`${pcm}/m.md`, "note du dépôt master\n");
+    sh("git add -A && git commit -qm init-master && git push -q origin HEAD:master", pcm);
+    const URL_MASTER = `http://127.0.0.1:${PORT}/remote-master.git`;
+    const mkAt = (dir: string) =>
+      new MobileGit(
+        { fs, http, dir, token: () => TOKEN, author: () => ({ name: "Téléphone", email: "tel@t" }) },
+        () => ({ commitMessage: "mobile: {{date}} ({{count}})", push: true, pullBeforePush: true }),
+        () => {},
+        (m: string) => errors.push(m),
+      );
+    const phoneM = path.join(ROOT, "phone-master");
+    fs.mkdirSync(phoneM);
+    const gm = mkAt(phoneM);
+    let err = "";
+    await gm.connect(URL_MASTER).catch((e: any) => (err = e.message));
+    check("dépôt en master : connexion sans erreur", !err, err);
+    check("dépôt en master : note récupérée", fs.existsSync(`${phoneM}/m.md`) && fs.readFileSync(`${phoneM}/m.md`, "utf8") === "note du dépôt master\n");
+    check("dépôt en master : branche master", (await gm.info()).branch === "master");
+    fs.writeFileSync(`${phoneM}/depuis-tel.md`, "écrit sur le téléphone\n");
+    await gm.sync(true);
+    check("dépôt en master : push sur master", sh("git show master:depuis-tel.md", path.join(ROOT, "remote-master.git")) === "écrit sur le téléphone");
+
+    // Téléphone déjà branché sur un dépôt en main, qu'on rebranche sur un dépôt en master
+    err = "";
+    await g.connect(URL_MASTER).catch((e: any) => (err = e.message));
+    check("rebranchement main → master : sans erreur", !err, err);
+    check("rebranchement : branche master", (await g.info()).branch === "master");
+    check("rebranchement : note du nouveau dépôt récupérée", fs.existsSync(`${phone}/m.md`));
+
+    // Dépôt vide : message clair, rien de cassé
+    sh("git init -q --bare -b main remote-vide.git");
+    const phoneV = path.join(ROOT, "phone-vide");
+    fs.mkdirSync(phoneV);
+    err = "";
+    await mkAt(phoneV).connect(`http://127.0.0.1:${PORT}/remote-vide.git`).catch((e: any) => (err = e.message));
+    check("dépôt vide : message clair", /vide/.test(err), err);
+
+    // Adresse du plugin au lieu de celle du coffre
+    err = "";
+    await mkAt(phoneV).connect("https://github.com/TheoYOSHIURA/obsidian-collab-vault").catch((e: any) => (err = e.message));
+    check("adresse du plugin refusée", /plugin/.test(err), err);
   } finally {
     server.kill();
   }

@@ -88,10 +88,37 @@ export class MobileGit extends GitBase {
     return this.guard(() => this.connectInner(url, onProgress));
   }
 
+  /**
+   * Branche par défaut du dépôt (main, master…), demandée à GitHub. Sans `ref`, git.fetch
+   * prendrait la branche locale du téléphone : main après un premier essai, même si le dépôt
+   * est en master. Renvoie null si le dépôt est vide.
+   */
+  private async remoteDefaultBranch(url: string): Promise<string | null> {
+    const b = this.base;
+    const info = await git.getRemoteInfo({ http: b.http, url, onAuth: b.onAuth, onAuthFailure: b.onAuthFailure });
+    // Les refs arrivent en arbre : refs.heads.main = oid (et HEAD = "refs/heads/main" à la racine).
+    const tree: Record<string, unknown> = info.refs?.heads ?? {};
+    const heads = Object.keys(tree).filter(h => typeof tree[h] === "string");
+    if (!heads.length) return null;
+    const head = info.HEAD?.replace(/^refs\/heads\//, "");
+    if (head && heads.includes(head)) return head;
+    return ["main", "master"].find(h => heads.includes(h)) ?? heads[0];
+  }
+
   private async connectInner(url: string, onProgress?: (s: string) => void): Promise<void> {
     const b = this.base;
+    if (/\/obsidian-collab-vault(\.git)?\/?$/i.test(url.trim())) {
+      throw new Error("Cette adresse est celle du plugin Collab Vault. Indique le dépôt GitHub qui contient les notes du coffre.");
+    }
+    onProgress?.("Connexion au dépôt…");
+    const branch = await this.remoteDefaultBranch(url);
+    if (!branch) {
+      throw new Error(
+        "Le dépôt GitHub est vide : fais d'abord une première sauvegarde depuis un ordinateur (assistant « Configurer git »), puis réessaie.",
+      );
+    }
     if (!(await this.isRepo())) {
-      await git.init({ fs: b.fs, dir: b.dir, defaultBranch: "main" });
+      await git.init({ fs: b.fs, dir: b.dir, defaultBranch: branch });
       await git.addRemote({ fs: b.fs, dir: b.dir, remote: "origin", url });
     } else {
       await git.setConfig({ fs: b.fs, dir: b.dir, path: "remote.origin.url", value: url });
@@ -100,10 +127,10 @@ export class MobileGit extends GitBase {
     const res = await git.fetch({
       ...b,
       remote: "origin",
+      ref: branch,
       singleBranch: true,
       onProgress: p => onProgress?.(`Téléchargement… ${p.phase} ${p.total ? Math.round((p.loaded / p.total) * 100) + " %" : ""}`),
     });
-    const branch = (res.defaultBranch ?? "refs/heads/main").replace("refs/heads/", "");
     const remoteRef = `refs/remotes/origin/${branch}`;
     const oid = res.fetchHead ?? (await git.resolveRef({ fs: b.fs, dir: b.dir, ref: remoteRef }));
     await git.writeRef({ fs: b.fs, dir: b.dir, ref: `refs/heads/${branch}`, value: oid, force: true });
