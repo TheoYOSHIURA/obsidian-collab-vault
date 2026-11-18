@@ -107,9 +107,7 @@ export class MobileGit extends GitBase {
 
   private async connectInner(url: string, onProgress?: (s: string) => void): Promise<void> {
     const b = this.base;
-    if (/\/obsidian-collab-vault(\.git)?\/?$/i.test(url.trim())) {
-      throw new Error("Cette adresse est celle du plugin Collab Vault. Indique le dépôt GitHub qui contient les notes du coffre.");
-    }
+    if (isPluginRepo(url)) throw new Error(PLUGIN_REPO_MESSAGE);
     onProgress?.("Connexion au dépôt…");
     const branch = await this.remoteDefaultBranch(url);
     if (!branch) {
@@ -240,11 +238,30 @@ export class MobileGit extends GitBase {
     return { ahead, behind, remoteOid: remote };
   }
 
+  /**
+   * Télécharge la branche depuis GitHub. Si le dépôt n'a pas cette branche, l'adresse enregistrée
+   * est presque toujours la mauvaise (ex. celle du plugin) : on le dit au lieu de « Could not find… ».
+   */
+  private async fetchBranch(branch: string) {
+    const b = this.base;
+    const url = await this.remoteUrl();
+    if (isPluginRepo(url)) throw new Error(PLUGIN_REPO_MESSAGE);
+    try {
+      await git.fetch({ ...b, remote: "origin", ref: branch, singleBranch: true });
+    } catch (e: any) {
+      if (e?.code !== "NotFoundError") throw e;
+      throw new Error(
+        `Le dépôt ${url} n'a pas de branche « ${branch} ». Vérifie l'adresse dans l'assistant git du téléphone ` +
+          "(réglages de Collab Vault) : ce doit être le dépôt qui contient les notes de ce coffre, puis relance la connexion.",
+      );
+    }
+  }
+
   /** Récupère le distant et fusionne. En cas de conflit sur une ligne, notre version (la session) gagne. */
   private async fetchAndMerge(branch: string) {
     const b = this.base;
     this.set("git: pull…");
-    await git.fetch({ ...b, remote: "origin", ref: branch, singleBranch: true });
+    await this.fetchBranch(branch);
     const { behind } = await this.aheadBehind(branch);
     if (!behind) return;
     const author = this.o.author();
@@ -311,7 +328,7 @@ export class MobileGit extends GitBase {
   private async doAdoptInner() {
     const b = this.base;
     const branch = await this.branch();
-    await git.fetch({ ...b, remote: "origin", ref: branch, singleBranch: true });
+    await this.fetchBranch(branch);
     const oid = await git.resolveRef({ fs: b.fs, dir: b.dir, ref: `refs/remotes/origin/${branch}` });
     await git.writeRef({ fs: b.fs, dir: b.dir, ref: `refs/heads/${branch}`, value: oid, force: true });
     await this.mixedReset(oid);
@@ -322,7 +339,7 @@ export class MobileGit extends GitBase {
   }
 
   private async doFetchInner() {
-    await git.fetch({ ...this.base, remote: "origin", ref: await this.branch(), singleBranch: true });
+    await this.fetchBranch(await this.branch());
   }
 
   async info(): Promise<GitInfo> {
@@ -378,6 +395,12 @@ export class MobileGit extends GitBase {
     return out;
   }
 }
+
+/** Adresse du dépôt du plugin, collée par erreur à la place de celle des notes. */
+const isPluginRepo = (url: string) => /\/obsidian-collab-vault(\.git)?\/?$/i.test(url.trim());
+const PLUGIN_REPO_MESSAGE =
+  "L'adresse du dépôt est celle du plugin Collab Vault, pas celle de tes notes. Dans l'assistant git du téléphone " +
+  "(réglages de Collab Vault), indique le dépôt GitHub qui contient les notes de ce coffre, puis relance la connexion.";
 
 async function exists(fs: any, path: string) {
   try {

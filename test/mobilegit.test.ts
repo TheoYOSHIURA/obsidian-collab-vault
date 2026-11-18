@@ -150,6 +150,26 @@ async function main() {
     await mkAt(phoneV).connect(`http://127.0.0.1:${PORT}/remote-vide.git`).catch((e: any) => (err = e.message));
     check("dépôt vide : message clair", /vide/.test(err), err);
 
+    // Coffre déjà relié (main) dont l'adresse enregistrée pointe vers un dépôt sans main :
+    // la synchro doit expliquer quoi faire au lieu de « Could not find refs/heads/main ».
+    const phoneS = path.join(ROOT, "phone-stale");
+    fs.mkdirSync(phoneS);
+    const gs = mkAt(phoneS);
+    await gs.connect(URL);
+    sh(`git -C "${phoneS}" config remote.origin.url ${URL_MASTER}`);
+    fs.writeFileSync(`${phoneS}/x.md`, "x\n");
+    await gs.sync(true);
+    check("adresse sans la branche : message clair", /n'a pas de branche « main »/.test(gs.lastError?.message ?? ""), gs.lastError);
+    check("adresse sans la branche : commit gardé en local", (await gs.info()).ahead >= 1);
+    sh(`git -C "${phoneS}" config remote.origin.url https://github.com/TheoYOSHIURA/obsidian-collab-vault.git`);
+    await gs.sync(true);
+    check("adresse du plugin enregistrée : message clair", /celle du plugin/.test(gs.lastError?.message ?? ""), gs.lastError);
+    // Après correction de l'adresse dans l'assistant, tout repart
+    await gs.connect(URL);
+    await gs.sync(true);
+    check("adresse corrigée : synchro sans erreur", gs.lastError === null, gs.lastError);
+    check("adresse corrigée : note envoyée", sh("git show main:x.md", path.join(ROOT, "remote.git")) === "x");
+
     // Adresse du plugin au lieu de celle du coffre
     err = "";
     await mkAt(phoneV).connect("https://github.com/TheoYOSHIURA/obsidian-collab-vault").catch((e: any) => (err = e.message));
