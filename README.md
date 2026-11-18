@@ -1,80 +1,129 @@
 # Collab Vault
 
-Plugin Obsidian pour écrire à plusieurs dans un même coffre, en temps réel (on voit les curseurs des autres), sans serveur, avec une sauvegarde git automatique.
+Plugin Obsidian qui fait **deux choses indépendantes** :
 
-## Comment ça marche
+| | 💾 Sauvegarde git | 👥 Collaboration en direct |
+|---|---|---|
+| **À quoi ça sert** | Garder l'historique du coffre sur GitHub et le retrouver sur chaque appareil | Écrire à plusieurs dans la même note en même temps, en voyant les curseurs des autres |
+| **Comment ça passe** | Par GitHub : commit, pull, push | D'un appareil à l'autre, en direct (WebRTC), sans serveur |
+| **Délai** | Quelques dizaines de secondes à quelques minutes | Immédiat, lettre par lettre |
+| **Il faut** | Un dépôt GitHub, et git (ordinateur) ou un jeton GitHub (téléphone) | Une invitation (`.collab/room.json` ou un lien), et les autres connectés en même temps |
+| **Marche seul ?** | Oui, même si tu es le seul à utiliser le coffre | Oui, même sans git, mais alors rien n'est sauvegardé sur GitHub |
+| **Se configure avec** | « Configurer git et la connexion GitHub » | « Activer la collaboration » puis « Inviter quelqu'un » |
 
-- **Pas de serveur à nous.** Les pairs se trouvent via des relais Nostr publics : c'est la bibliothèque [Trystero](https://github.com/dmotz/trystero), et la mise en relation est chiffrée avec le secret du coffre. Ensuite tout passe en direct, en WebRTC chiffré.
-- **Le premier qui ouvre le coffre devient l'hôte.** Il charge les notes depuis son disque et les autres reçoivent sa version. S'il part, la session continue : le suivant devient hôte.
-- **Les éditions simultanées sont fusionnées** grâce au CRDT [Yjs](https://yjs.dev). Chacun voit les curseurs des autres, avec leur nom. Ctrl+Z n'annule que tes propres modifs.
-- **Un seul membre fait la sauvegarde git** : le plus ancien de la session qui a git. Il commit et push 30 s après la dernière modif, et fait un pull toutes les 2 min. Les autres ne touchent pas à git pendant la session, ce qui évite les conflits.
-- **Sans session** (pas d'invitation dans le coffre), le plugin fait juste la sauvegarde git automatique.
-- **Les images et les PDF** sont transmis aux autres quand ils changent. Un nouveau venu reçoit ceux qui lui manquent.
-- `.obsidian/workspace.json` et les réglages du plugin sont propres à chaque machine : ils sont sortis du dépôt automatiquement.
+Tu peux utiliser **seulement la sauvegarde** (un coffre perso sauvegardé sur GitHub), **seulement la collaboration** (des amis sans GitHub), ou **les deux** (le cas le plus courant : voir [Les deux ensemble](#-les-deux-ensemble)).
 
-## Installation
+---
 
-### Ordinateur (Windows, Mac, Linux)
-- **Avec accès au dépôt git du coffre** : clone le dépôt (GitHub Desktop convient), ouvre le dossier dans Obsidian et accepte « Faire confiance à l'auteur ». Le plugin est déjà dedans.
-- **Git et connexion GitHub** : palette de commandes → « Collab Vault : Configurer git et la connexion GitHub ». L'assistant :
-  - installe Git for Windows si besoin (via `winget`, sinon il ouvre la page de téléchargement) ;
-  - règle ton nom et ton e-mail pour les sauvegardes ;
-  - affiche un bouton **Se connecter à GitHub**, qui ouvre la fenêtre de connexion de Git Credential Manager, inclus avec Git for Windows ;
-  - vérifie l'accès au dépôt.
-  Il s'ouvre aussi tout seul, via une notification, si git manque ou si GitHub refuse la connexion.
-  Être connecté dans GitHub Desktop ne suffit pas : le plugin utilise la commande `git` de l'ordinateur.
-- **Nouveau coffre (pas encore sur GitHub)** : au premier lancement, le plugin propose une fois de configurer la sauvegarde. L'assistant :
-  - crée le dépôt git du coffre (branche `main`, `.gitattributes`, `.gitignore` des fichiers propres à chaque machine) ;
-  - sauvegarde aussitôt en local, même sans GitHub ;
-  - propose **Créer sur GitHub** (ouvre la page de création d'un dépôt privé déjà nommé) puis **Relier** avec l'adresse du dépôt. Si le dépôt est vide, la sauvegarde suivante y envoie les notes. S'il contient déjà des notes, elles sont fusionnées avec celles du coffre. En cas de conflit, rien n'est fusionné et la liaison est annulée.
+## 💾 Sauvegarde git
 
-### Android / iPhone
-1. Dans Obsidian mobile, crée un coffre vide.
-2. Installe le plugin **BRAT** depuis les plugins communautaires, puis ajoute le plugin beta `TheoYOSHIURA/obsidian-collab-vault`.
-3. Ouvre le lien d'invitation (`obsidian://collab-vault?...`) : les notes arrivent depuis la session. Il faut qu'un membre soit connecté.
-4. **Optionnel, sauvegarde git sur le téléphone :** réglages du plugin → « Ouvrir l'assistant ». Indique l'adresse du dépôt (déjà remplie si elle figure dans l'invitation), un **jeton GitHub**, ton nom et ton e-mail.
-   - Le jeton : github.com → Settings → Developer settings → Personal access tokens → **Fine-grained tokens** → Generate new token. Dans « Repository access », choisis *Only select repositories* → le dépôt du coffre. Dans « Permissions », mets **Contents : Read and write**.
-   - Le plugin branche le coffre sur le dépôt **sans écraser les notes présentes** et récupère les fichiers manquants. Sur un coffre vide, c'est un simple clone.
-   - Le téléphone ne commit et ne pousse que **quand il est seul**. Dès qu'un ordinateur avec git est dans la session, c'est l'ordinateur qui sauvegarde.
-   - Le git du téléphone est écrit en JavaScript (isomorphic-git), parce que le programme `git` ne tourne pas sur téléphone. Le jeton reste dans les réglages du plugin, sur le téléphone, et n'est jamais versionné.
+### Ce que ça fait
+- **Commit et push automatiques** 30 s après ta dernière modification.
+- **Pull toutes les 2 min**, et au démarrage d'Obsidian : tu récupères ce que les autres appareils ont envoyé.
+- En cas de conflit avec GitHub, la fusion garde ta version pour les lignes en conflit, pour que la sauvegarde ne reste jamais bloquée.
+- Les fichiers propres à chaque appareil ne sont **jamais versionnés** : `.obsidian/workspace.json`, `workspace-mobile.json` et les réglages du plugin (`data.json`, `base-*.json`). Le plugin les ajoute au `.gitignore` tout seul.
+
+### Sur ordinateur (Windows, Mac, Linux)
+Palette de commandes → **« Collab Vault : Configurer git et la connexion GitHub »**. L'assistant vérifie chaque étape et propose un bouton quand quelque chose manque :
+
+1. **Git installé** : il affiche quel git est utilisé et permet d'en choisir un autre (chemin de `git.exe`). Sous Windows, il peut installer Git for Windows (`winget`).
+2. **Ton nom pour les sauvegardes** : le nom et l'e-mail des commits.
+3. **Dépôt git du coffre** :
+   - Si les notes sont **déjà sur GitHub** : clone le dépôt (GitHub Desktop convient) et ouvre ce dossier dans Obsidian. Le plugin est déjà dedans.
+   - Si c'est un **nouveau coffre** : bouton **Créer le dépôt** (branche `main`). La sauvegarde marche tout de suite en local, même sans GitHub. Le plugin le propose une fois au premier lancement.
+4. **Dépôt GitHub** : bouton **Créer sur GitHub** (ouvre la page de création d'un dépôt privé déjà nommé), puis colle son adresse et clique sur **Relier**.
+   - Dépôt vide : la sauvegarde suivante y envoie les notes.
+   - Dépôt qui a déjà des notes : elles sont fusionnées avec celles du coffre. En cas de conflit, rien n'est fusionné et la liaison est annulée.
+5. **Connexion à GitHub** : la fenêtre de connexion (Git Credential Manager) s'ouvre toute seule. Si ton git n'a pas Git Credential Manager, le plugin le cherche sur l'ordinateur ; sinon il propose d'installer Git for Windows, qui l'inclut.
+
+Être connecté dans GitHub Desktop ne suffit pas : le plugin utilise la commande `git` de l'ordinateur.
+
+### Sur téléphone (Android, iPhone)
+Le programme `git` n'existe pas sur téléphone : le plugin utilise un git écrit en JavaScript (isomorphic-git) et un **jeton GitHub**.
+
+Réglages de Collab Vault → **« Ouvrir l'assistant »** : indique l'adresse du dépôt **qui contient tes notes** (pas celle du plugin), le jeton, ton nom et ton e-mail.
+
+- **Créer le jeton** : github.com → Settings → Developer settings → Personal access tokens → **Fine-grained tokens** → Generate new token. « Repository access » : *Only select repositories* → le dépôt du coffre. « Permissions » : **Contents : Read and write**. Pour un dépôt d'organisation, choisis l'organisation comme « Resource owner ».
+- Le plugin relie le coffre au dépôt **sans écraser les notes déjà présentes** et récupère les fichiers manquants. Il utilise la branche par défaut du dépôt (`main`, `master`…).
+- Le jeton reste dans les réglages du plugin, sur le téléphone. Il n'est jamais versionné.
+
+### Voir où en est la sauvegarde
+Icône « branche » du ruban, ou **« Afficher l'état de la sauvegarde git »** : état (à jour, en attente avec compte à rebours, erreur), qui sauvegarde, fichiers pas encore sur GitHub, historique (clic sur un commit → fichiers modifiés, lien GitHub). Boutons **Commit & push** et **Récupérer**.
+
+Les délais, le message de commit, le push automatique et la synchro au démarrage se règlent dans les réglages du plugin.
+
+---
+
+## 👥 Collaboration en direct
+
+### Ce que ça fait
+- **Tout le monde écrit en même temps** dans la même note. Les modifications sont fusionnées avec [Yjs](https://yjs.dev) : personne n'écrase personne.
+- **Tu vois les curseurs des autres**, avec leur nom et leur couleur, et qui est sur quelle note.
+- **Ctrl+Z n'annule que tes propres modifs.**
+- **Les images et les PDF** sont envoyés aux autres quand ils changent. Un nouveau venu reçoit ceux qui lui manquent.
+- **Pas de serveur à nous** : les appareils se trouvent via des relais Nostr publics ([Trystero](https://github.com/dmotz/trystero)), avec une mise en relation chiffrée par le secret du coffre. Ensuite tout passe en direct, en WebRTC chiffré.
+- **Le premier qui ouvre le coffre devient l'hôte** : il charge les notes depuis son disque, les autres reçoivent sa version. S'il part, la session continue avec le suivant.
+
+### Activer et inviter
+1. Palette de commandes → **« Collab Vault : Activer la collaboration dans ce coffre »**. Ça crée `.collab/room.json` (identifiant et secret de la session).
+2. **« Collab Vault : Inviter quelqu'un »** :
+   - **Ami qui a accès au dépôt GitHub** : ajoute-le comme collaborateur (bouton « Ajouter sur GitHub »). Il clone le dépôt et ouvre le dossier dans Obsidian : le plugin et l'invitation sont déjà dedans. Il rejoint la session tout seul, même si `room.json` arrive par un pull pendant qu'Obsidian est ouvert.
+   - **Ami sans GitHub** : copie le **lien d'invitation** et envoie-le-lui. La page qui s'ouvre ([docs/invite.html](docs/invite.html)) le guide : coffre vide, plugins communautaires, puis des boutons pour installer BRAT, installer Collab Vault et rejoindre. L'invitation est dans la partie `#…` du lien, que le navigateur n'envoie jamais au serveur. Le lien direct `obsidian://collab-vault?…` reste disponible si le plugin est déjà installé.
+
+### Pendant la session
+- **Qui est là** : clic sur la barre d'état, ou l'icône 👥 du ruban.
+- **Retirer quelqu'un** : bouton 👤✕ dans « Qui est là ? », ou **« Changer la clé du coffre (retirer quelqu'un) »** s'il n'est pas connecté. La nouvelle clé est envoyée à tout le monde sauf lui.
+  - ⚠️ Retire-le **aussi** du dépôt GitHub, sinon il récupérera la nouvelle clé par git.
+  - Il garde la copie des notes qu'il a déjà : on ne peut pas la lui reprendre.
+  - Les amis sans GitHub devront recevoir un nouveau lien.
+- **Ça ne se connecte pas** : « Collab Vault : Reconnecter la session ». Si une notification dit qu'un membre est injoignable, c'est le réseau (voir [Limites connues](#limites-connues)).
 
 ### Modifications hors ligne
-Chaque appareil garde la dernière version partagée des notes, hors git, dans `base-*.json`. Quand il rejoint une session après avoir modifié hors ligne (téléphone dans le métro, PC resté seul), il fait une fusion à trois, comme git :
+Chaque appareil garde la dernière version partagée des notes, hors git, dans `base-*.json`. En rejoignant une session après avoir modifié hors ligne (téléphone dans le métro, PC resté seul), il fait une fusion à trois, comme git :
 - les modifications des deux côtés sont gardées ;
 - si les deux ont modifié les mêmes lignes, la session garde sa version, et l'autre est conservée dans une copie `Note (conflit <nom> <date>).md`.
 
-## Utilisation
+---
 
-- **Activer** : palette de commandes → « Collab Vault : Activer la collaboration dans ce coffre ». Ça crée `.collab/room.json`, qui contient l'identifiant de la session et son secret.
-- **Inviter** : « Collab Vault : Inviter quelqu'un ».
-  - **Ami avec accès au dépôt git** : ajoute-le comme collaborateur GitHub. Il clone le dépôt, ouvre le dossier dans Obsidian et active les plugins communautaires. Le plugin et l'invitation sont déjà dedans.
-  - **Ami sans git** : envoie-lui le lien d'invitation. Il ouvre une page ([docs/invite.html](docs/invite.html), sur GitHub Pages) qui le guide : coffre vide, plugins communautaires, puis des boutons pour installer BRAT, installer Collab Vault (BRAT le garde à jour) et rejoindre le coffre. L'invitation est dans la partie `#…` du lien, que le navigateur n'envoie jamais au serveur. Le lien direct `obsidian://collab-vault?...` reste disponible si le plugin est déjà installé.
-- **Voir qui est là** : clique sur la barre d'état, ou utilise l'icône 👥 du ruban. Tu y vois aussi qui est sur quelle note.
-- **État de la sauvegarde git** : l'icône « branche » du ruban, ou la commande « Afficher l'état de la sauvegarde git ». Le panneau montre l'état (à jour, en attente avec compte à rebours, erreur), qui sauvegarde, les fichiers pas encore sur GitHub et l'historique (clic sur un commit → fichiers modifiés, lien GitHub).
-- **Retirer quelqu'un** : bouton 👤✕ dans « Qui est là ? », ou la commande « Changer la clé du coffre » s'il n'est pas connecté. La clé de la session change et est envoyée à tout le monde sauf lui ; les membres avec git la reçoivent par le dépôt.
-  - ⚠️ Retire-le **aussi** du dépôt GitHub, sinon il récupérera la nouvelle clé par git.
-  - Il garde la copie des notes qu'il a déjà sur son ordinateur : on ne peut pas la lui reprendre.
-  - Les amis sans git devront recevoir un nouveau lien.
+## 🔗 Les deux ensemble
+
+Quand la collaboration et la sauvegarde sont actives dans le même coffre :
+
+- **Un seul membre sauvegarde** : le plus ancien de la session qui a git, sur ordinateur de préférence. Les autres ne touchent pas à git pendant la session, ce qui évite les conflits. Le panneau git indique qui sauvegarde. S'il part, le suivant reprend.
+- **Un téléphone ne sauvegarde que s'il est seul.** Dès qu'un ordinateur avec git est dans la session, c'est lui qui sauvegarde.
+- **Un membre sans git** (ami invité par lien) : ses modifications arrivent chez les autres en direct, et c'est le membre avec git qui les envoie sur GitHub. **Si personne n'a git dans la session, rien n'est sauvegardé.**
+- **L'invitation passe par git** : `.collab/room.json` est versionné, donc un ami qui a accès au dépôt est invité automatiquement.
+- **Un appareil qui ne peut pas rejoindre la session** (réseau fermé) continue de sauvegarder de son côté : ses modifications passent par GitHub, avec quelques minutes de délai au lieu du direct.
+
+---
+
+## Installer le plugin
+
+- **Ordinateur, coffre déjà sur GitHub** : rien à faire, le plugin est dans le dépôt (`.obsidian/plugins/collab-vault/`). Active les plugins communautaires et accepte « Faire confiance à l'auteur ».
+- **Téléphone, ou coffre sans le plugin** : installe **BRAT** depuis les plugins communautaires, puis ajoute le plugin beta `TheoYOSHIURA/obsidian-collab-vault`. BRAT le garde à jour. La page d'invitation fait ces étapes avec des boutons.
+- **À la main** : copie `main.js`, `manifest.json` et `styles.css` de la [dernière release](https://github.com/TheoYOSHIURA/obsidian-collab-vault/releases/latest) dans `.obsidian/plugins/collab-vault/`, puis relance Obsidian.
 
 ## Limites connues
 
-- Il faut qu'un membre avec git soit présent pour que le travail de la session soit sauvegardé.
-- Derrière certains réseaux très fermés (NAT symétrique, réseau d'école…), la connexion WebRTC directe peut échouer. Il faudrait alors un serveur TURN.
-- Les relais Nostr publics sont gratuits mais pas garantis.
-- Sur téléphone : non testé sur un vrai Android. Les tests simulent le mode téléphone dans Obsidian sur ordinateur et utilisent un serveur git HTTP local à jeton, pas GitHub.
-- L'installation automatique de git (`winget`) et la fenêtre de connexion GitHub sont propres à Windows et n'ont pas été testées sur un vrai Windows.
+- **Collaboration** : derrière certains réseaux très fermés (réseau d'école ou d'entreprise, NAT symétrique), la connexion directe échoue. Le plugin le signale par une notification. Il faudrait alors un serveur relais TURN, pas encore pris en charge.
+- **Collaboration** : les relais Nostr publics sont gratuits mais pas garantis.
+- **Sauvegarde** : il faut qu'un membre avec git soit présent pour que le travail d'une session soit sauvegardé.
+- **Sauvegarde, Windows** : l'installation automatique de git (`winget`) n'a pas été testée sur un vrai Windows.
+- **Sauvegarde, téléphone** : un dépôt GitHub vide ne peut pas être relié depuis un téléphone. Fais la première sauvegarde depuis un ordinateur.
 
 ## Développement
 
 ```sh
 npm install
 npm run build   # → main.js (à copier avec manifest.json et styles.css dans .obsidian/plugins/collab-vault/)
-npm test        # cœur de synchro, modifs hors ligne, git du téléphone (contre un serveur git HTTP local)
+npm test        # synchro, modifs hors ligne, git du téléphone (serveur git HTTP local), assistant git ordinateur
 tools/e2e/scenario.sh       # test de bout en bout dans un vrai Obsidian (profil isolé, 3 coffres)
 tools/e2e/agent-writes.sh   # écritures d'un agent (ex. Claude via Agent Client) sur des notes ouvertes
 ```
 
-**Publier une version** : mets à jour `version` dans `manifest.json` et `package.json`, commit, puis pousse un tag du même nom (`git tag 0.4.6 && git push origin 0.4.6`). L'action GitHub « Release » compile, lance les tests et publie `main.js`, `manifest.json` et `styles.css` : BRAT propose alors la mise à jour.
+`npm test` utilise une syntaxe sh : sous Windows, lance-le depuis Git Bash.
+
+**Publier une version** : mets à jour `version` dans `manifest.json` et `package.json`, commit, puis pousse un tag du même nom (`git tag 0.4.9 && git push origin 0.4.9`). L'action GitHub « Release » compile, lance les tests et publie `main.js`, `manifest.json` et `styles.css` : BRAT propose alors la mise à jour.
 
 **Page d'invitation** : servie par GitHub Pages depuis le dossier `docs/` de `master` (Settings → Pages → Deploy from a branch → `master` / `/docs`).
 
