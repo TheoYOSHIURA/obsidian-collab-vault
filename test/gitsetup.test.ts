@@ -109,7 +109,67 @@ async function main() {
   // 7. adresse invalide
   check(!(await C.setup.connectRemote("pas une adresse")).ok, "adresse invalide refusée");
 
-  fs.rmSync(root, { recursive: true, force: true });
+  // 8. Récupérer depuis GitHub ne doit jamais réécrire une note qu'on n'a pas besoin de changer.
+  //    (rebase / stash remettaient la note à son ancienne version un instant : Obsidian la
+  //    rechargeait et on voyait un « rollback ».) On date les fichiers dans le passé : s'ils sont
+  //    réécrits, même avec le même contenu, leur date change.
+  const e1 = vault("e1", {});
+  const e2 = vault("e2", {});
+  for (const e of [e1, e2]) {
+    git(e, "clone", "-q", url, ".");
+    git(e, "config", "user.name", "Test");
+    git(e, "config", "user.email", "test@example.com");
+    git(e, "config", "core.autocrlf", "false");
+  }
+  const E1 = backup(e1);
+  const old = new Date("2020-01-01T00:00:00Z");
+  const stamp = (f: string) => fs.utimesSync(f, old, old);
+  const untouched = (f: string) => fs.statSync(f).mtimeMs === old.getTime();
+  // Les coffres ont « * text=auto » : sous Windows les notes sont écrites en \r\n.
+  const read = (f: string) => fs.readFileSync(f, "utf8").replace(/\r/g, "");
+  const pushFrom = (e: string, file: string, text: string) => {
+    fs.writeFileSync(`${e}/${file}`, text);
+    git(e, "add", "-A");
+    git(e, "commit", "-qm", "autre appareil");
+    git(e, "pull", "-q", "--no-rebase");
+    git(e, "push", "-q");
+  };
+
+  // a) un commit local, un commit distant sur une autre note : fusion sans réécrire la note locale
+  fs.writeFileSync(`${e1}/Locale.md`, "écrite ici\n");
+  git(e1, "add", "-A");
+  git(e1, "commit", "-qm", "local");
+  stamp(`${e1}/Locale.md`);
+  pushFrom(e2, "Distante.md", "écrite ailleurs\n");
+  await E1.g.sync(true);
+  check(E1.errors.length === 0, "fusion : sans erreur " + E1.errors.join(" | "));
+  check(untouched(`${e1}/Locale.md`), "fusion : la note locale n'est pas réécrite");
+  check(read(`${e1}/Distante.md`) === "écrite ailleurs\n", "fusion : la note distante arrive");
+  check(git(bare, "rev-parse", "main") === git(e1, "rev-parse", "HEAD"), "fusion : envoyé sur GitHub");
+
+  // b) note en cours d'écriture (pas encore commitée) pendant une récupération
+  fs.writeFileSync(`${e1}/Locale.md`, "écrite ici\nen cours de frappe\n");
+  stamp(`${e1}/Locale.md`);
+  pushFrom(e2, "Distante.md", "écrite ailleurs\nencore\n");
+  await E1.g.pull();
+  check(E1.errors.length === 0, "note en cours : sans erreur " + E1.errors.join(" | "));
+  check(untouched(`${e1}/Locale.md`), "note en cours : pas réécrite (pas de stash)");
+  check(read(`${e1}/Locale.md`) === "écrite ici\nen cours de frappe\n", "note en cours : texte intact");
+  check(read(`${e1}/Distante.md`) === "écrite ailleurs\nencore\n", "note en cours : la note distante arrive quand même");
+
+  // c) la note en cours d'écriture a aussi changé sur GitHub : on n'y touche pas, on réessaie après commit
+  pushFrom(e2, "Locale.md", "écrite ici\nmodifiée ailleurs\n");
+  stamp(`${e1}/Locale.md`);
+  await E1.g.pull();
+  check(E1.errors.length === 0, "même note : pas d'erreur, récupération reportée " + E1.errors.join(" | "));
+  check(untouched(`${e1}/Locale.md`) && read(`${e1}/Locale.md`) === "écrite ici\nen cours de frappe\n", "même note : texte en cours intact");
+  await E1.g.sync(true);
+  check(!fs.existsSync(`${e1}/.git/MERGE_HEAD`), "même note : rien de bloqué après la synchro suivante");
+  check(git(bare, "rev-parse", "main") === git(e1, "rev-parse", "HEAD"), "même note : tout est envoyé");
+  check(read(`${e1}/Locale.md`).includes("en cours de frappe"), "même note : notre version gardée");
+
+  if (!failed) fs.rmSync(root, { recursive: true, force: true });
+  else console.log("dossier gardé : " + root);
   console.log(failed ? `\n${failed} échec(s)` : "\nTout est OK");
   process.exit(failed ? 1 : 0);
 }

@@ -287,18 +287,34 @@ export class Git extends GitBase {
     return out;
   }
 
-  private async pullRebase() {
+  /**
+   * Récupère GitHub en n'écrivant sur le disque que la version finale de chaque fichier.
+   * Pas de rebase ni de stash : ils passent par des états intermédiaires (la note revient à son
+   * ancienne version puis repart), qu'Obsidian recharge dans l'éditeur ouvert : un « rollback »
+   * visible, que la session pouvait même envoyer aux autres.
+   */
+  private async integrate() {
+    await this.run(["fetch", "--quiet"]);
+    if ((await this.run(["rev-list", "--count", "HEAD..@{u}"])) === "0") return; // rien de nouveau
+    const ahead = await this.run(["rev-list", "--count", "@{u}..HEAD"]);
     try {
-      await this.run(["pull", "--rebase", "--autostash"]);
+      // Que des nouveautés côté GitHub : avance rapide. Sinon : fusion (pas de réécriture de nos commits).
+      await this.run(ahead === "0" ? ["merge", "--ff-only", "--quiet", "@{u}"] : ["merge", "--no-edit", "--quiet", "@{u}"]);
       return;
     } catch (e: any) {
-      await this.run(["rebase", "--abort"]).catch(() => {});
-      console.warn("[collab-vault] rebase impossible, on tente un merge", e);
+      await this.run(["merge", "--abort"]).catch(() => {});
+      // Une note pas encore commitée serait écrasée : git refuse sans rien toucher. On réessaie
+      // au tour suivant, une fois la note commitée (la synchro commit avant de récupérer).
+      if (/would be overwritten|untracked working tree files/i.test(e.message)) {
+        console.log("[collab-vault] récupération reportée : une note est en cours d'écriture");
+        return;
+      }
+      console.warn("[collab-vault] fusion en conflit, on garde la version de la session", e);
     }
-    // Conflit : on fusionne en gardant notre version pour les lignes en conflit
-    // (notre disque = l'état de la session, le plus récent). Sinon la sauvegarde resterait bloquée.
+    // Mêmes lignes modifiées des deux côtés : on garde notre version (notre disque = l'état de
+    // la session, le plus récent). Sinon la sauvegarde resterait bloquée.
     try {
-      await this.run(["pull", "--no-rebase", "--no-edit", "-X", "ours"]);
+      await this.run(["merge", "--no-edit", "--quiet", "-X", "ours", "@{u}"]);
       this.onError("conflit avec le dépôt distant : fusion faite en gardant la version de la session.", false);
     } catch (e: any) {
       await this.run(["merge", "--abort"]).catch(() => {});
@@ -330,7 +346,7 @@ export class Git extends GitBase {
 
   protected async doPull() {
     if (!(await this.upstream())) return; // rien à récupérer tant que le coffre n'est pas relié
-    await this.pullRebase();
+    await this.integrate();
   }
 
   protected async doSync(alwaysPull: boolean) {
@@ -363,7 +379,7 @@ export class Git extends GitBase {
     if (ahead !== "0" || alwaysPull) {
       if (s.pullBeforePush || alwaysPull) {
         this.set("git: pull…");
-        await this.pullRebase();
+        await this.integrate();
       }
       const aheadNow = await this.run(["rev-list", "--count", "@{u}..HEAD"]).catch(() => "1");
       if (aheadNow !== "0") {
